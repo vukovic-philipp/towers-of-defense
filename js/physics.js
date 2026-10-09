@@ -3,16 +3,17 @@
 // Cave: random sites -> Lloyd relaxation -> each Voronoi cell is shrunk by half the channel width, so the
 // rocks are convex polygons and the gaps between them are the Voronoi edges ("veins") balls tumble through.
 // Balls: semi-implicit Euler, gravity + air drag, spatial-hash ball/ball collisions, ball/segment collisions.
-import { W, H, GOBLINS, mulberry32 } from './data.js';
+import { GOBLINS, mulberry32 } from './data.js';
 
-export const LEAK_Y = H - 14;       // balls reaching this line hit the castle
+// The simulation runs with gravity along +y in a (W wide) x (H tall) frame; the renderer and input layer transpose
+// x/y so that on screen the balls flow left -> right.
 export const GRAV = 180, DRAG = 2.0;
-const Y0 = 40, Y1 = 500;            // rock region (spawn zone above, castle runout below)
+const Y0 = 40, Y1_GAP = 20;         // rock region starts 40 below the spawn edge and ends 20 above the castle line
 const GAP = 18;                     // rock-to-rock channel = 2 * GAP
 const SHIFT_TB = 36, SHIFT_LR = 26; // clearance to top/bottom and side walls
-const N_SITES = 20, EMPTY_P = 0.12;
+const SITE_AREA = 9400, EMPTY_P = 0.12; // one Voronoi site per ~9400 square units
 const CELL = 32, OY = 60;
-const BCOLS = Math.ceil(W / CELL), BROWS = Math.ceil((H + 2 * OY) / CELL);
+export const leakY = H => H - 14;   // balls reaching this line hit the castle
 const E_BALL = 0.25, E_WALL = 0.3, MU = 0.35, VMAX = 320, KICK_AFTER = 0.8;
 
 function clip(poly, nx, ny, c) {
@@ -27,7 +28,7 @@ function clip(poly, nx, ny, c) {
   return out;
 }
 
-function cellPoly(i, sites, ghosts, shiftReal, shiftTB, shiftLR) {
+function cellPoly(i, sites, ghosts, shiftReal, shiftTB, shiftLR, W, H) {
   let poly = [-300, -300, W + 300, -300, W + 300, H + 300, -300, H + 300];
   const sx = sites[i][0], sy = sites[i][1];
   const cut = (ox, oy, shift) => {
@@ -51,7 +52,7 @@ function centroid(poly, fb) {
 }
 const polyArea = p => { let a = 0; for (let i = 0, n = p.length / 2; i < n; i++) { const j = (i + 1) % n; a += p[2 * i] * p[2 * j + 1] - p[2 * j] * p[2 * i + 1]; } return Math.abs(a) / 2; };
 
-function makeGhosts(sites) {
+function makeGhosts(sites, W, Y1) {
   const g = [];
   for (const [x, y] of sites) {
     g.push([-x, y, 1], [2 * W - x, y, 1], [x, 2 * Y0 - y, 0], [x, 2 * Y1 - y, 0]);
@@ -60,8 +61,10 @@ function makeGhosts(sites) {
 }
 
 export class Cave {
-  constructor(seed) {
-    this.seed = seed;
+  constructor(seed, W = 440, H = 620) {
+    this.seed = seed; this.W = W; this.H = H; this.leak = leakY(H);
+    const Y1 = H - Y1_GAP, N_SITES = Math.round(W * H / SITE_AREA);
+    this.cols = Math.ceil(W / CELL); this.rows = Math.ceil((H + 2 * OY) / CELL);
     const rnd = mulberry32(seed * 2654435761 + 17);
     // best-candidate sampling for evenly spread sites
     let sites = [];
@@ -75,23 +78,24 @@ export class Cave {
       sites.push(best);
     }
     for (let it = 0; it < 2; it++) { // Lloyd relaxation
-      const gh = makeGhosts(sites);
+      const gh = makeGhosts(sites, W, Y1);
       sites = sites.map((s, i) => {
-        const c = centroid(cellPoly(i, sites, gh, 0, 0, 0), s);
+        const c = centroid(cellPoly(i, sites, gh, 0, 0, 0, W, H), s);
         return [Math.min(W - 5, Math.max(5, c[0])), Math.min(Y1 - 5, Math.max(Y0 + 5, c[1]))];
       });
     }
     this.sites = sites;
-    const gh = makeGhosts(sites);
+    const gh = makeGhosts(sites, W, Y1);
     this.rocks = [];
     sites.forEach((s, i) => {
-      const poly = cellPoly(i, sites, gh, GAP, SHIFT_TB, SHIFT_LR);
+      const poly = cellPoly(i, sites, gh, GAP, SHIFT_TB, SHIFT_LR, W, H);
       if (poly.length >= 6 && polyArea(poly) > 150 && rnd() > EMPTY_P) this.rocks.push(poly);
     });
     this.buildSegments();
   }
 
   buildSegments() {
+    const { W, H, cols, rows } = this;
     const segs = [];
     for (const p of this.rocks) {
       const n = p.length / 2;
@@ -106,12 +110,12 @@ export class Cave {
       this.sinv[i] = 1 / Math.max(1e-6, (x2 - x1) ** 2 + (y2 - y1) ** 2);
     });
     // uniform grid -> CSR lists of segment ids near each cell
-    const lists = Array.from({ length: BCOLS * BROWS }, () => []);
+    const lists = Array.from({ length: cols * rows }, () => []);
     const pad = 16;
     segs.forEach(([x1, y1, x2, y2], i) => {
-      const c0 = Math.max(0, Math.floor((Math.min(x1, x2) - pad) / CELL)), c1 = Math.min(BCOLS - 1, Math.floor((Math.max(x1, x2) + pad) / CELL));
-      const r0 = Math.max(0, Math.floor((Math.min(y1, y2) - pad + OY) / CELL)), r1 = Math.min(BROWS - 1, Math.floor((Math.max(y1, y2) + pad + OY) / CELL));
-      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) lists[r * BCOLS + c].push(i);
+      const c0 = Math.max(0, Math.floor((Math.min(x1, x2) - pad) / CELL)), c1 = Math.min(cols - 1, Math.floor((Math.max(x1, x2) + pad) / CELL));
+      const r0 = Math.max(0, Math.floor((Math.min(y1, y2) - pad + OY) / CELL)), r1 = Math.min(rows - 1, Math.floor((Math.max(y1, y2) + pad + OY) / CELL));
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) lists[r * cols + c].push(i);
     });
     this.cellStart = new Int32Array(lists.length + 1);
     let tot = 0; lists.forEach((l, i) => { this.cellStart[i] = tot; tot += l.length; });
@@ -124,10 +128,11 @@ export class Cave {
 export class BallWorld {
   constructor(cave, max) {
     this.cave = cave; this.max = max; this.n = 0;
+    this.W = cave.W; this.cols = cave.cols; this.rows = cave.rows;
     const F = () => new Float32Array(max);
     this.x = F(); this.y = F(); this.vx = F(); this.vy = F(); this.r = F(); this.invM = F();
     this.drag = F(); this.slowT = F(); this.slowF = F(); this.rest = F();
-    this.head = new Int32Array(BCOLS * BROWS); this.nxt = new Int32Array(max);
+    this.head = new Int32Array(cave.cols * cave.rows); this.nxt = new Int32Array(max);
     this.rs = 12345;
   }
   rand() { // xorshift32 -> [0,1)
@@ -149,7 +154,7 @@ export class BallWorld {
   step(dt, sub = 3) { const h = dt / sub; for (let s = 0; s < sub; s++) this.substep(h); }
 
   substep(h) {
-    const { n, x, y, vx, vy, r, invM, drag, slowT, slowF, rest, head, nxt, cave } = this;
+    const { n, x, y, vx, vy, r, invM, drag, slowT, slowF, rest, head, nxt, cave, W, cols: BCOLS, rows: BROWS } = this;
     // integrate
     for (let i = 0; i < n; i++) {
       let f = 1;
@@ -225,6 +230,7 @@ export class BallWorld {
 
 /** Drop a mixed batch through the empty cave; it is valid when every ball reaches the castle line. */
 export function validateCave(cave) {
+  const { W } = cave, LEAK_Y = cave.leak;
   const w = new BallWorld(cave, 64), rnd = mulberry32(99);
   const mix = [0, 0, 0, 0, 1, 1, 2, 3];
   for (let k = 0; k < 40; k++) {
@@ -240,10 +246,10 @@ export function validateCave(cave) {
 }
 
 /** First seed (from the given one) whose cave passes validation. */
-export function buildCave(seed) {
+export function buildCave(seed, W, H) {
   let last = null;
   for (let k = 0; k < 40; k++) {
-    const cave = new Cave(seed + k * 7919), v = validateCave(cave);
+    const cave = new Cave(seed + k * 7919, W, H), v = validateCave(cave);
     cave.validation = v; cave.attempts = k + 1; last = cave;
     if (v.ok) return cave;
   }

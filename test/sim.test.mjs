@@ -1,9 +1,12 @@
 // Run: node test/sim.test.mjs
 import assert from 'node:assert/strict';
 import { Game } from '../js/sim.js';
-import { BallWorld, buildCave, Cave, validateCave, LEAK_Y } from '../js/physics.js';
+import { BallWorld, buildCave, Cave, validateCave } from '../js/physics.js';
 import { computeMods } from '../js/meta.js';
-import { W, H, GOBLINS, waveList } from '../js/data.js';
+import { GOBLINS, waveList } from '../js/data.js';
+
+// iPad-landscape-like arena: 440 tall (sim width), ~1.45 aspect long (sim height)
+const DIMS = { w: 440, h: 640 };
 
 const DT = 1 / 60;
 
@@ -11,23 +14,23 @@ const DT = 1 / 60;
 assert.equal(waveList(50).length, 300);
 assert.ok(waveList(10).includes(3), 'boss on wave 10');
 {
-  const cave = buildCave(1);
+  const cave = buildCave(1, DIMS.w, DIMS.h);
   assert.ok(cave.validation.ok, 'a valid cave is found');
   assert.ok(cave.rocks.length >= 8, 'cave has rocks');
-  let ok = 0; for (let s = 1; s <= 20; s++) if (validateCave(new Cave(s)).ok) ok++;
+  let ok = 0; for (let s = 1; s <= 20; s++) if (validateCave(new Cave(s, DIMS.w, DIMS.h)).ok) ok++;
   console.log(`cave generator: ${ok}/20 raw seeds pass the drop test (failures are rerolled), avg transit ${cave.validation.avgTime.toFixed(1)} s`);
   assert.ok(ok >= 8);
 }
 // --- physics: ball rests on floor-like contact & collisions conserve separation
 {
-  const cave = buildCave(3), w = new BallWorld(cave, 8);
+  const cave = buildCave(3, DIMS.w, DIMS.h), w = new BallWorld(cave, 8);
   w.add(100, 0, 6, 1); w.add(100.5, 0, 6, 1);
   for (let i = 0; i < 30; i++) w.step(DT);
   assert.ok(Math.hypot(w.x[0] - w.x[1], w.y[0] - w.y[1]) > 11, 'overlapping balls are pushed apart');
 }
 // --- building
 {
-  const g = new Game(computeMods({}), 5);
+  const g = new Game(computeMods({}), 5, DIMS);
   assert.ok(!g.build('frost', 100, 100), 'frost locked');
   assert.ok(!g.build('arrow', -5, 100), 'outside map');
   const t = g.build('arrow', 100, 100);
@@ -38,8 +41,8 @@ assert.ok(waveList(10).includes(3), 'boss on wave 10');
 }
 
 // --- greedy bot with free placement: puts towers where balls spend the most time
-const OPENING = [[70, 290], [290, 290], [180, 370], [70, 420], [290, 420], [180, 210], [70, 180], [290, 180]];
-function makeBot() {
+const OPENING = [[70, 290], [290, 290], [180, 370], [70, 420], [290, 420], [180, 210], [70, 180], [290, 180]].map(([x, y]) => [x / 360, y / 520]);
+function makeBot(W, H) {
   const heat = new Float32Array(Math.ceil(W / 30) * Math.ceil(H / 30));
   const cols = Math.ceil(W / 30);
   for (let r = 4; r < 15; r++) for (let c = 0; c < cols; c++) heat[r * cols + c] = 0.5; // prior: uniform over the cave body
@@ -53,7 +56,7 @@ function makeBot() {
         const rot = Array.from({ length: types.length }, (_, k) => types[(g.towers.length + k) % types.length]);
         const type = rot.find(t => g.gold >= g.towerCost(t));
         if (!type) return;
-        const book = OPENING.find(([x, y]) => g.canPlace(x, y));
+        const book = OPENING.map(([fx, fy]) => [fx * W, fy * H]).find(([x, y]) => g.canPlace(x, y));
         if (book && g.towers.length < OPENING.length) { g.build(type, book[0], book[1]); return; }
         // best free cell by heat (smoothed over neighbours), restricted to the playfield
         let best = null, bv = -1;
@@ -74,7 +77,7 @@ function makeBot() {
   };
 }
 function run(levels, label, maxWave = 120, seed = 42) {
-  const g = new Game(computeMods(levels), seed), bot = makeBot();
+  const g = new Game(computeMods(levels), seed, DIMS), bot = makeBot(DIMS.w, DIMS.h);
   let peak = 0, steps = 0, ms = 0, worst = 0;
   while (!g.over && g.wave < maxWave) {
     if (steps % 30 === 0) { bot.step(g); if (!g.spawning && g.n === 0) g.skipCountdown(); }
@@ -101,12 +104,12 @@ for (const [label, lv] of TECH_SETS) {
 
 // --- worst-case perf: 300 balls dropped as one dense blob into a cave, many max-level towers
 {
-  const g = new Game(computeMods({ frost: 1, tesla: 1 }), 7);
+  const g = new Game(computeMods({ frost: 1, tesla: 1 }), 7, DIMS);
   g.gold = 1e12; g.lives = 1e12;
   const types = ['arrow', 'cannon', 'frost', 'tesla']; let k = 0;
-  for (let y = 80; y < 470; y += 40) for (let x = 30; x < 340; x += 45) { const t = g.build(types[k++ % 4], x, y); if (t) while (g.upgrade(t)); }
+  for (let y = 80; y < 600; y += 45) for (let x = 30; x < 420; x += 50) { const t = g.build(types[k++ % 4], x, y); if (t) while (g.upgrade(t)); }
   g.waveHpNow = 1e9; g.wave = 40;
-  for (let i = 0; i < 300; i++) g.spawn(i % 3), g.y[i] = -6 - Math.floor(i / 23) * 13, g.x[i] = 12 + (i % 23) * 14.5;
+  for (let i = 0; i < 300; i++) g.spawn(i % 3), g.y[i] = -6 - Math.floor(i / 29) * 13, g.x[i] = 12 + (i % 29) * 14.5;
   let ms = 0, worst = 0; const N = 900;
   for (let i = 0; i < N; i++) { g.hp.fill(1e9, 0, g.n); const t0 = performance.now(); g.update(DT); const d = performance.now() - t0; ms += d; worst = Math.max(worst, d); }
   console.log(`worst case: ${g.towers.length} lvl5 towers, ${g.n} balls (dense) -> avg ${(ms / N).toFixed(3)} ms, worst ${worst.toFixed(2)} ms per tick (budget at 60 Hz: 16.7 ms)`);

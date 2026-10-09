@@ -1,6 +1,5 @@
 // Static game data: world size, balls, towers, tech tree, wave formulas.
 
-export const W = 360, H = 520;
 
 export function mulberry32(a) {
   return function () {
@@ -13,26 +12,26 @@ export function mulberry32(a) {
 
 // "Goblins" are physics balls. r = radius (mass ~ r^2), drag = air-drag multiplier (lower = falls faster).
 export const GOBLINS = [
-  { name: 'Grunt',   hp: 1,    bounty: 1, leak: 1,  r: 6,  drag: 1,    color: '#4caf50' },
-  { name: 'Scout',   hp: 0.55, bounty: 1, leak: 1,  r: 5,  drag: 0.65, color: '#ffeb3b' },
-  { name: 'Brute',   hp: 4,    bounty: 3, leak: 2,  r: 9,  drag: 1.25, color: '#ff9800' },
-  { name: 'Warlord', hp: 45,   bounty: 40, leak: 10, r: 13, drag: 1.4,  color: '#b052d6' },
+  { name: 'Grunt',   hp: 1,    bounty: 1, leak: 1,  r: 6,  drag: 1,    color: '#4ade80' },
+  { name: 'Scout',   hp: 0.55, bounty: 1, leak: 1,  r: 5,  drag: 0.65, color: '#facc15' },
+  { name: 'Brute',   hp: 4,    bounty: 3, leak: 2,  r: 9,  drag: 1.25, color: '#fb923c' },
+  { name: 'Warlord', hp: 45,   bounty: 40, leak: 10, r: 13, drag: 1.4,  color: '#e879f9' },
 ];
 
 // Towers are free-placed anywhere, never collide with balls. push/blast = physics impulses (px/s).
 export const TOWERS = {
-  arrow:  { name: 'Archer', icon: '🏹', color: '#d4a24c', cost: 100, range: 100, dmg: 9,  rate: 2.6, push: 25,
+  arrow:  { name: 'Archer', color: '#f6c453', cost: 100, range: 100, dmg: 9,  rate: 2.6, push: 25,
             desc: 'Fast shots, nudges balls' },
-  cannon: { name: 'Cannon', icon: '💣', color: '#7f8c8d', cost: 220, range: 90,  dmg: 26, rate: 0.85, splash: 38, blast: 170,
+  cannon: { name: 'Cannon', color: '#f08a5d', cost: 220, range: 90,  dmg: 26, rate: 0.85, splash: 38, blast: 170,
             desc: 'Explosion blasts balls away' },
-  frost:  { name: 'Frost',  icon: '❄️', color: '#5dade2', cost: 160, range: 80,  dmg: 2,  rate: 1.3, slow: 0.35,
+  frost:  { name: 'Frost',  color: '#7cc7ff', cost: 160, range: 80,  dmg: 2,  rate: 1.3, slow: 0.35,
             desc: 'Slows everything in range', unlock: 'frost' },
-  tesla:  { name: 'Tesla',  icon: '⚡', color: '#f4d03f', cost: 380, range: 92,  dmg: 20, rate: 1.25, chain: 3,
+  tesla:  { name: 'Tesla',  color: '#c9a7ff', cost: 380, range: 92,  dmg: 20, rate: 1.25, chain: 3,
             desc: 'Chain lightning, jolts balls', unlock: 'tesla' },
 };
 export const TOWER_ORDER = ['arrow', 'cannon', 'frost', 'tesla'];
 export const MAX_LEVEL = 5;
-export const TARGET_MODES = ['Lowest', 'Strongest', 'Closest'];
+export const TARGET_MODES = ['Furthest', 'Strongest', 'Closest'];
 export const upgradeCost = (type, lvl) => Math.round(TOWERS[type].cost * (0.7 + 0.5 * lvl));
 export const SELL_RATIO = 0.7;
 export const PRICE_CREEP = 0.07;      // each owned tower raises the price of the next by 7%

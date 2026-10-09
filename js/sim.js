@@ -1,19 +1,22 @@
 // Headless game simulation (no DOM): waves, economy, towers and weapon impulses on top of BallWorld.
 import {
-  W, H, GOBLINS, TOWERS, MAX_LEVEL, upgradeCost, SELL_RATIO, PRICE_CREEP, TOWER_SPACING, START_GOLD,
+  GOBLINS, TOWERS, MAX_LEVEL, upgradeCost, SELL_RATIO, PRICE_CREEP, TOWER_SPACING, START_GOLD,
   waveList, waveHp, waveBounty, mulberry32,
 } from './data.js';
-import { BallWorld, buildCave, LEAK_Y } from './physics.js';
+import { BallWorld, buildCave } from './physics.js';
 
 const MAXE = 1024;
 const MAX_FX = 160;
 const FIRST_WAVE_DELAY = 15, WAVE_GAP = 10;
 
 export class Game {
-  constructor(mods, seed = 1) {
+  /** dims = { w, h }: simulation frame (gravity along +y). Screen shows it transposed (flow left to right). */
+  constructor(mods, seed = 1, dims = { w: 440, h: 620 }) {
     this.mods = mods;
+    this.W = dims.w; this.H = dims.h;
     this.rng = mulberry32(seed);
-    this.cave = buildCave(seed);
+    this.cave = buildCave(seed, this.W, this.H);
+    this.leakY = this.cave.leak;
     this.w = new BallWorld(this.cave, MAXE);
     this.w.rs = (seed * 2654435761 | 0) || 1;
     // typed arrays are shared with the physics world
@@ -44,7 +47,7 @@ export class Game {
     return best;
   }
   canPlace(x, y) {
-    if (x < 8 || x > W - 8 || y < 8 || y > LEAK_Y - 14) return false;
+    if (x < 8 || x > this.W - 8 || y < 8 || y > this.leakY - 14) return false;
     for (const t of this.towers) if ((t.x - x) ** 2 + (t.y - y) ** 2 < TOWER_SPACING * TOWER_SPACING) return false;
     return true;
   }
@@ -104,7 +107,7 @@ export class Game {
   }
   spawn(type) {
     const g = GOBLINS[type];
-    const i = this.w.add(g.r + 3 + this.rng() * (W - 2 * g.r - 6), -g.r - 2, g.r, g.drag, 25);
+    const i = this.w.add(g.r + 3 + this.rng() * (this.W - 2 * g.r - 6), -g.r - 2, g.r, g.drag, 25);
     if (i < 0) return false;
     this.type[i] = type;
     this.hp[i] = this.maxhp[i] = this.waveHpNow * g.hp;
@@ -135,7 +138,7 @@ export class Game {
 
     this.w.step(dt);
     for (let i = 0; i < this.n; i++) {
-      if (this.y[i] >= LEAK_Y && this.hp[i] > 0) {
+      if (this.y[i] >= this.leakY && this.hp[i] > 0) {
         this.lives -= GOBLINS[this.type[i]].leak; this.hp[i] = 0; this.events.push('leak');
       }
     }
@@ -250,10 +253,10 @@ export class Game {
 
   /** Remove dead balls (swap-remove), pay bounties for kills (not for leaks). */
   reap() {
-    const { hp, y, type } = this;
+    const { hp, y, type, leakY } = this;
     for (let i = this.n - 1; i >= 0; i--) {
       if (hp[i] > 0) continue;
-      if (y[i] < LEAK_Y) {
+      if (y[i] < leakY) {
         const g = GOBLINS[type[i]];
         this.gold += Math.max(1, Math.round(g.bounty * waveBounty(this.wave) * this.mods.bounty));
         this.kills++;
