@@ -1,6 +1,7 @@
 import {
-  WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, TOWERS, MAX_LEVEL, SELL_RATIO, TOWER_SPACING, BUILD_DEPTH,
+  WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, TOWERS, TREES, NODES, SELL_RATIO, TOWER_SPACING,
   START_GOLD, START_LIVES, FIRST_WAVE_DELAY, WAVE_GAP, towerValue, waveSpec,
+  choices, nodeCost, towerStats, statLine,
 } from './data.js';
 import { buildField, makeBuildCheck, WALLS, ROCKS } from './map.js';
 import { createGpu } from './gpu.js';
@@ -12,6 +13,7 @@ const el = {
   board: $('board'), stage: $('stage'), cT: $('cTerrain'), cG: $('cGpu'), cU: $('cUi'),
   panel: $('panel'), toast: $('toast'),
   menu: $('menu'), mPlay: $('mPlay'), mError: $('mError'),
+  tree: $('tree'), treeBody: $('treeBody'), treeTitle: $('treeTitle'), treeGold: $('treeGold'), treeClose: $('treeClose'),
   over: $('over'), oWave: $('oWave'), oKills: $('oKills'), oBest: $('oBest'), oRetry: $('oRetry'), oMenu: $('oMenu'),
 };
 
@@ -104,9 +106,9 @@ function drawUi(time) {
     ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
   };
   if (G.selected >= 0 && G.towers[G.selected]) {
-    const t = G.towers[G.selected], d = TOWERS[t.kind];
-    ctx.fillStyle = 'rgba(230,237,243,0.04)'; ctx.beginPath(); ctx.arc(t.x, t.y, d.range[t.level], 0, 6.2832); ctx.fill();
-    ring(t.x, t.y, d.range[t.level], d.color, true, 0.8);
+    const t = G.towers[G.selected], d = TOWERS[t.kind], rg = towerStats(t.kind, t.path).range;
+    ctx.fillStyle = 'rgba(230,237,243,0.04)'; ctx.beginPath(); ctx.arc(t.x, t.y, rg, 0, 6.2832); ctx.fill();
+    ring(t.x, t.y, rg, d.color, true, 0.8);
     ring(t.x, t.y, 21, '#e6edf3', false);
   }
   if (G.spot) {
@@ -142,18 +144,21 @@ function placeTower(kind) {
   const slot = G.towers.findIndex((t) => !t);
   if (slot < 0) return toast('Tower limit reached');
   G.gold -= d.cost;
-  G.towers[slot] = { kind, level: 0, x: G.spot.x, y: G.spot.y };
+  G.towers[slot] = { kind, path: [], x: G.spot.x, y: G.spot.y };
   G.spot = null; G.selected = slot;
   syncTowers(slot); renderPanel(); updateHud();
 }
-function upgradeTower() {
-  const t = G.towers[G.selected]; if (!t || t.level >= MAX_LEVEL) return;
-  const cost = TOWERS[t.kind].upgrade[t.level];
-  if (G.gold < cost) return;
-  G.gold -= cost; t.level++;
-  syncTowers(); renderPanel(); updateHud();
+function buyNode(id) {
+  const t = G.towers[G.selected]; if (!t) return;
+  const n = choices(t.kind, t.path).find((c) => c.id === id);
+  if (!n) return;
+  const cost = nodeCost(t.kind, n);
+  if (G.gold < cost) return toast('Not enough gold');
+  G.gold -= cost; t.path.push(id);
+  syncTowers(); renderPanel(); renderTree(); updateHud();
 }
 function sellTower() {
+  closeTree();
   const t = G.towers[G.selected]; if (!t) return;
   G.gold += Math.floor(towerValue(t) * SELL_RATIO);
   const slot = G.selected;
@@ -163,7 +168,7 @@ function sellTower() {
 function refreshPanel() {
   for (const b of el.panel.children) if (b.dataset.cost !== undefined) b.classList.toggle('dim', G.gold < +b.dataset.cost);
 }
-function clearSelection() { G.spot = null; G.selected = -1; renderPanel(); }
+function clearSelection() { G.spot = null; G.selected = -1; closeTree(); renderPanel(); }
 
 let toastTimer = 0;
 function toast(msg) {
@@ -185,20 +190,60 @@ function renderPanel() {
       `<span class="dot ${DOT[k]}" style="border-color:${d.color}"></span><span class="nm">${d.name}</span><span class="cs">${d.cost}</span><small>${d.blurb}</small>`,
       () => placeTower(k), d.cost));
   } else if (G.selected >= 0 && G.towers[G.selected]) {
-    const t = G.towers[G.selected], d = TOWERS[t.kind];
+    const t = G.towers[G.selected], d = TOWERS[t.kind], st = towerStats(t.kind, t.path), opts = choices(t.kind, t.path);
     showTop(t.y);
     const info = document.createElement('div'); info.className = 'info';
-    info.innerHTML = `<b>${d.name} level ${t.level + 1}</b><span>${d.stat(t.level)}</span><span>range ${d.range[t.level]}</span>`;
+    const last = t.path.length ? NODES[t.kind][t.path[t.path.length - 1]].name : 'Base';
+    info.innerHTML = `<b>${d.name}</b><span>${last}</span><span>${statLine(t.kind, st)}</span><span>range ${Math.round(st.range)}</span>`;
     el.panel.appendChild(info);
-    if (t.level < MAX_LEVEL) {
-      const c = d.upgrade[t.level];
-      mkBtn('abtn', `Upgrade<b>${c}</b>`, upgradeTower, c);
-    } else {
-      const b = mkBtn('abtn', 'Max level', () => {}); b.disabled = true;
+    for (const n of opts) {
+      const c = nodeCost(t.kind, n);
+      mkBtn('ucard', `<b>${n.name}</b><small>${n.desc}</small><span class="cs">${c}</span>`, () => buyNode(n.id), c);
     }
+    if (opts.length > 1) { const h = document.createElement('div'); h.className = 'pick'; h.textContent = 'Pick one'; el.panel.insertBefore(h, el.panel.children[1]); }
+    if (!opts.length) { const m = document.createElement('div'); m.className = 'info'; m.innerHTML = '<b>Fully upgraded</b>'; el.panel.appendChild(m); }
+    mkBtn('abtn', 'Upgrade tree', openTree);
     mkBtn('abtn', `Sell<b>+${Math.floor(towerValue(t) * SELL_RATIO)}</b>`, sellTower);
     mkBtn('abtn', 'Close', clearSelection);
   }
+}
+
+// ---------- upgrade tree overlay ----------
+function openTree() { el.tree.classList.remove('hidden'); renderTree(); }
+function closeTree() { el.tree.classList.add('hidden'); }
+function renderTree() {
+  if (el.tree.classList.contains('hidden')) return;
+  const t = G.towers[G.selected];
+  if (!t) return closeTree();
+  const d = TOWERS[t.kind], tree = TREES[t.kind], N = NODES[t.kind];
+  const avail = new Set(choices(t.kind, t.path).map((n) => n.id));
+  el.treeTitle.textContent = `${d.name} upgrade tree`;
+  el.treeGold.textContent = Math.floor(G.gold);
+  const state = (n) => {
+    if (t.path.includes(n.id)) return 'owned';
+    if (avail.has(n.id)) return 'avail';
+    // a sibling of a node already taken (or a child of a rejected parent) is gone for good
+    if (n.tier === 1 && t.path.length >= 1) return 'out';
+    if (n.tier === 2 && t.path.length >= 1 && t.path[0] !== n.parent) return 'out';
+    if (n.tier === 2 && t.path.length >= 2) return 'out';
+    return 'future';
+  };
+  const card = (n, extra = '') => {
+    const st = state(n), cost = nodeCost(t.kind, n);
+    const dim = st === 'avail' && G.gold < cost ? ' dim' : '';
+    const tag = st === 'owned' ? 'Owned' : st === 'out' ? 'Locked out' : cost;
+    return `<button class="tnode ${st}${dim}" data-id="${n.id}" ${st === 'avail' ? '' : 'disabled'} style="${extra}"><b>${n.name}</b><small>${n.desc}</small><span class="cs">${tag}</span></button>`;
+  };
+  const t1 = tree.filter((n) => n.tier === 1);
+  let html = '<div class="tgrid"><h4>Tier 1: path</h4><h4>Tier 2: specialty</h4><h4>Tier 3: capstone</h4>';
+  t1.forEach((p, i) => {
+    html += `<div class="cell c1" style="grid-row:${i + 2}">${card(p)}</div>`;
+    html += `<div class="cell c2 two" style="grid-row:${i + 2}">${tree.filter((n) => n.parent === p.id).map((n) => card(n)).join('')}</div>`;
+  });
+  html += `<div class="cell c3" style="grid-row:2 / span 2">${card(N.master)}</div></div>`;
+  html += '<p class="muted">Each choice locks out its alternatives for this tower. Selling the tower resets the tree.</p>';
+  el.treeBody.innerHTML = html;
+  for (const b of el.treeBody.querySelectorAll('button.tnode.avail')) b.addEventListener('click', () => buyNode(b.dataset.id));
 }
 
 // ---------- waves ----------
@@ -296,7 +341,7 @@ function loop(now) {
     gpu.frame(steps, { time: now / 1000 });
     if (G.running) pullCounters();
     const gShown = Math.floor(G.gold);
-    if (gShown !== lastGoldShown) { lastGoldShown = gShown; refreshPanel(); }
+    if (gShown !== lastGoldShown) { lastGoldShown = gShown; refreshPanel(); if (!el.tree.classList.contains('hidden')) { el.treeGold.textContent = gShown; for (const b of el.treeBody.querySelectorAll('button.tnode.avail')) b.classList.toggle('dim', G.gold < nodeCost(G.towers[G.selected].kind, NODES[G.towers[G.selected].kind][b.dataset.id])); } }
     updateHud();
     drawUi(now / 1000);
   }
@@ -324,6 +369,7 @@ el.cU.addEventListener('pointerdown', (e) => {
 el.cU.addEventListener('pointermove', (e) => { G.hover = e.pointerType === 'mouse' ? worldPos(e) : null; });
 el.cU.addEventListener('pointerleave', () => { G.hover = null; });
 
+el.treeClose.addEventListener('click', closeTree);
 el.bWave.addEventListener('click', () => { if (G.running && !G.over) launchWave(true); });
 el.bPause.addEventListener('click', () => { G.paused = !G.paused; el.bPause.textContent = G.paused ? 'Resume' : 'Pause'; });
 el.bSpeed.addEventListener('click', () => { G.speed = G.speed >= 3 ? 1 : G.speed + 1; el.bSpeed.textContent = `${G.speed}x`; });
