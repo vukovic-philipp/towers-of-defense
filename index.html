@@ -18,6 +18,8 @@
   <header id="hud">
     <div class="stats">
       <div class="stat"><span>Gold</span><b id="hGold">0</b></div>
+      <div class="stat res iron"><span>Iron</span><b id="hIron">0</b><small id="hIronR"></small></div>
+      <div class="stat res coal"><span>Coal</span><b id="hCoal">0</b><small id="hCoalR"></small></div>
       <div class="stat"><span>Lives</span><b id="hLives">0</b></div>
       <div class="stat"><span>Wave</span><b id="hWave">0</b></div>
       <div class="stat"><span>Next wave</span><b id="hNext">0s</b></div>
@@ -46,6 +48,11 @@
     <h1>Towers of Defense</h1>
     <p class="sub">Hundreds of enemies pour through the canyon toward your gate. Build on the rocks and burn, shoot and blast them down.</p>
     <p id="mError" class="error hidden"></p>
+    <div class="mapsel">
+      <canvas id="mPreview" width="320" height="180"></canvas>
+      <div class="seg"><button id="mMapSketch" class="on">Sketch canyon</button><button id="mMapRandom">Random map</button></div>
+      <div class="row between"><span id="mSeed" class="muted"></span><button id="mReroll" class="hidden">New map</button></div>
+    </div>
     <button id="mPlay" class="primary big" disabled>Loading</button>
     <div class="split">
       <button id="mResearch" class="big">Research <span id="mShards" class="pill"></span></button>
@@ -56,12 +63,14 @@
       <summary>How to play</summary>
       <ul>
         <li>Tap a rock to pick a spot, then choose a tower. Towers only fit on rocks.</li>
+        <li>Tap an ore patch on the high ground to build a drill. Drills fill your iron and coal stockpile, and every tower burns ammunition from it: iron for guns and mortars, coal for flames and lasers. A tower with no ammo goes dark, so keep the mines ahead of your guns. Upgrade drills for more output.</li>
+        <li>Random map builds a new canyon from a seed. Every generated map is checked so enemies cannot get stuck in a dead end.</li>
         <li>Gun: quick single shots. Laser: a beam that pierces everything on its line.</li>
         <li>Flame: sets a cone on fire. Mortar: lobs shells that explode on the thickest clump.</li>
-        <li>Tap a tower to upgrade it. Each tower has its own upgrade tree, and every choice locks out its alternatives, so pick a role. Selling returns 70 percent of what you spent.</li>
+        <li>Tap a tower to upgrade it. Each tower has its own upgrade tree, and every choice locks out its alternatives, so pick a role. Tiers 4 and 5 are opened in the research tree. Selling returns 70 percent of what you spent.</li>
         <li>Enemies that reach the gate on the right cost lives. Big ones cost more.</li>
         <li>Waves arrive on a timer, so build before the countdown ends.</li>
-        <li>New enemy types show up as waves go on: some armored, some shielded, some heal, some flicker out of reach.</li>
+        <li>New enemy types show up as waves go on: some armored, some shielded, some heal, some flicker out of reach. Late waves bring heavy siege units with thick armor, so keep beams and flames around.</li>
         <li>When a run ends you earn research points. Spend them in the research tree for permanent bonuses.</li>
         <li>The workshop lets you design your own turret from a base behaviour, stat points and perks.</li>
       </ul>

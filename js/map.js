@@ -25,6 +25,8 @@ const ROCKS_RAW = [
 const wallPoly = (line, edgeY) => [...line.map(sk), sk([line[line.length - 1][0], edgeY]), sk([line[0][0], edgeY])];
 export const WALLS = [wallPoly(TOP_WALL, -300), wallPoly(BOTTOM_WALL, 1500)];
 export const ROCKS = ROCKS_RAW.map((p) => p.map(sk));
+// A layout is the whole level: wall polygons (void), rock polygons (buildable) and ore patches.
+export const SKETCH_LAYOUT = { name: 'Sketch canyon', walls: WALLS, rocks: ROCKS };
 
 export const CELL = 4;
 export const FW = WORLD_W / CELL;
@@ -101,11 +103,11 @@ class MinHeap {
   }
 }
 
-export function buildField() {
+export function buildField(layout = SKETCH_LAYOUT) {
   const N = FW * FH;
   const rockId = new Uint8Array(N); // 1-based rock index, 0 = free or wall
   const solid = new Uint8Array(N);
-  const boxes = [...WALLS.map((p) => ({ p, wall: true })), ...ROCKS.map((p, i) => ({ p, id: i + 1 }))].map((o) => {
+  const boxes = [...layout.walls.map((p) => ({ p, wall: true })), ...layout.rocks.map((p, i) => ({ p, id: i + 1 }))].map((o) => {
     const xs = o.p.map((q) => q[0]), ys = o.p.map((q) => q[1]);
     return { ...o, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
   });
@@ -175,7 +177,7 @@ export function buildField() {
     const i = cy * FW + 3;
     if (sdf[i] > 14 && isFinite(cost[i])) { y0 = Math.min(y0, cy); y1 = Math.max(y1, cy); }
   }
-  return { field, sdf, rockId, cost, spawnY0: (y0 + 0.5) * CELL, spawnY1: (y1 + 0.5) * CELL };
+  return { field, sdf, rockId, solid, cost, spawnY0: (y0 + 0.5) * CELL, spawnY1: (y1 + 0.5) * CELL };
 }
 
 export function makeBuildCheck(map) {
