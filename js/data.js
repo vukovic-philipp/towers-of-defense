@@ -6,14 +6,22 @@ export const MAX_ENEMIES = 4096;
 export const MAX_TOWERS = 64;
 export const MORTAR_FLIGHT = 0.8;
 
-// Enemy kinds are 1..4 on the GPU (0 means "slot is free").
+// Enemy kinds are 1..10 on the GPU (0 means "slot is free").
+// armor: flat damage removed from every bullet or shell (beams, flames and burning ignore it)
 export const ENEMIES = [
   null,
-  { name: 'Swarmer', radius: 4.5, speed: 72, hp: 14,   reward: 1,  leak: 1,  color: '#f4b266' },
-  { name: 'Grunt',   radius: 6,   speed: 56, hp: 42,   reward: 2,  leak: 1,  color: '#f07178' },
-  { name: 'Brute',   radius: 9.5, speed: 36, hp: 260,  reward: 8,  leak: 3,  color: '#b79cff' },
-  { name: 'Titan',   radius: 15,  speed: 24, hp: 3600, reward: 80, leak: 10, color: '#e6edf3' },
+  { name: 'Swarmer',   radius: 4.5, speed: 72,  hp: 14,   reward: 0.45, leak: 1,  armor: 0,  color: '#f4b266', desc: 'Weak, but there are hundreds.' },
+  { name: 'Grunt',     radius: 6,   speed: 56,  hp: 42,   reward: 1.1,  leak: 1,  armor: 0,  color: '#f07178', desc: 'The standard soldier.' },
+  { name: 'Brute',     radius: 9.5, speed: 36,  hp: 260,  reward: 4,    leak: 3,  armor: 0,  color: '#b79cff', desc: 'Slow and very tough.' },
+  { name: 'Titan',     radius: 15,  speed: 24,  hp: 3600, reward: 40,   leak: 10, armor: 0,  color: '#e6edf3', desc: 'Boss. Arrives every tenth wave.' },
+  { name: 'Sprinter',  radius: 4,   speed: 128, hp: 12,   reward: 0.6,  leak: 1,  armor: 0,  color: '#fde047', desc: 'Very fast. Gets through before slow towers react.' },
+  { name: 'Plated',    radius: 7.5, speed: 46,  hp: 130,  reward: 2.5,  leak: 2,  armor: 10, color: '#94a3b8', desc: 'Armored: every bullet loses 10 damage. Beams and fire ignore armor.' },
+  { name: 'Medic',     radius: 6,   speed: 52,  hp: 90,   reward: 3,    leak: 2,  armor: 0,  color: '#4ade80', desc: 'Heals enemies around it. Kill it first.' },
+  { name: 'Phantom',   radius: 5.5, speed: 70,  hp: 55,   reward: 2,    leak: 1,  armor: 0,  color: '#f0abfc', desc: 'Flickers out of reach for a moment every few seconds.' },
+  { name: 'Shielded',  radius: 6.5, speed: 50,  hp: 80,   reward: 3.5,  leak: 2,  armor: 0,  color: '#22d3ee', desc: 'Regenerating shield. Burning damage ignores it.' },
+  { name: 'Berserker', radius: 7,   speed: 44,  hp: 150,  reward: 3.5,  leak: 3,  armor: 0,  color: '#dc2626', desc: 'Gets much faster the more it is hurt.' },
 ];
+export const ENEMY_KINDS = ENEMIES.length - 1;
 
 // kind index matches the GPU: 0 gun, 1 laser, 2 flame, 3 mortar
 // Base stats at tier 0. Upgrade nodes below modify these. Meaning of the fields:
@@ -85,13 +93,15 @@ export function choices(kind, path) {
   return [];
 }
 
-export function towerStats(kind, path) {
-  const s = { ...TOWERS[kind].base };
+// base: optional custom-design base stats; bonus: global research multipliers {dmg, range}
+export function towerStats(kind, path, base = TOWERS[kind].base, bonus = null) {
+  const s = { ...base };
   for (const id of path) {
     const { mul, set } = NODES[kind][id].mods;
     for (const k in mul) s[k] *= mul[k];
     Object.assign(s, set);
   }
+  if (bonus) { s.dmg *= 1 + (bonus.dmg || 0); s.range *= 1 + (bonus.range || 0); }
   return s;
 }
 
@@ -108,26 +118,30 @@ export const SELL_RATIO = 0.7;
 export const TOWER_SPACING = 36;
 export const BUILD_DEPTH = 15; // min distance from a rock edge to place a tower
 
-export const START_GOLD = 200;
+export const START_GOLD = 170;
 export const START_LIVES = 25;
-export const FIRST_WAVE_DELAY = 14;
+export const FIRST_WAVE_DELAY = 18;
+export const WAVE_BONUS = (n) => 5 + n; // flat gold when a wave launches
 export const WAVE_GAP = 26;
 
-export function towerValue(t) {
-  return t.path.reduce((v, id) => v + nodeCost(t.kind, NODES[t.kind][id]), TOWERS[t.kind].cost);
-}
-
 // Wave n (1-based) -> counts per enemy kind + spawn duration + scaling.
+// Share of a wave per enemy kind: [first wave it appears, base share, share per wave after, max share]
+const SHARES = {
+  2: [2, 0.10, 0.03, 0.38], 5: [3, 0.04, 0.008, 0.14], 3: [5, 0.02, 0.02, 0.16], 6: [6, 0.02, 0.012, 0.12],
+  7: [8, 0.01, 0.006, 0.05], 8: [11, 0.01, 0.01, 0.08], 9: [13, 0.02, 0.011, 0.1], 10: [16, 0.02, 0.008, 0.08],
+};
+
+// Wave n (1-based) -> counts per enemy kind (index = kind), spawn duration and scaling.
 export function waveSpec(n) {
   const total = Math.floor(14 + 10 * Math.pow(n, 1.25));
-  const titans = n % 10 === 0 ? n / 10 : 0;
-  const brutes = n >= 5 ? Math.floor(total * Math.min(0.3, (n - 4) * 0.025)) : 0;
-  const grunts = n >= 2 ? Math.floor(total * Math.min(0.5, 0.12 + n * 0.035)) : 0;
-  const swarmers = Math.max(total - brutes - grunts, 10);
-  return {
-    counts: [0, swarmers, grunts, brutes, titans],
-    duration: 14 + Math.min(16, n * 0.6),
-    hpScale: Math.pow(1.08, n - 1),
-    goldMult: 1 + 0.07 * (n - 1),
-  };
+  const counts = new Array(ENEMIES.length).fill(0);
+  let others = 0;
+  for (const [k, [from, base, per, max]] of Object.entries(SHARES)) {
+    if (n < from) continue;
+    const c = Math.max(2, Math.floor(total * Math.min(max, base + per * (n - from))));
+    counts[k] = c; others += c;
+  }
+  counts[1] = Math.max(total - others, 10);
+  counts[4] = n % 10 === 0 ? n / 10 : 0;
+  return { counts, duration: 14 + Math.min(16, n * 0.6), hpScale: Math.pow(1.08, n - 1), goldMult: 1 + 0.025 * (n - 1) };
 }

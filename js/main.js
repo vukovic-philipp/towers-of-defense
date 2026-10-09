@@ -1,30 +1,36 @@
 import {
   WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, TOWERS, TREES, NODES, SELL_RATIO, TOWER_SPACING,
-  START_GOLD, START_LIVES, FIRST_WAVE_DELAY, WAVE_GAP, towerValue, waveSpec,
+  START_GOLD, START_LIVES, FIRST_WAVE_DELAY, WAVE_GAP, WAVE_BONUS, ENEMIES, waveSpec,
   choices, nodeCost, towerStats, statLine,
 } from './data.js';
 import { buildField, makeBuildCheck, WALLS, ROCKS } from './map.js';
 import { createGpu } from './gpu.js';
+import { loadMeta, saveMeta, effects, shardsFor } from './meta.js';
+import { sanitize, designBase, designCost, discount } from './design.js';
+import { initResearch } from './research.js';
+import { initWorkshop } from './workshop.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
-  gold: $('hGold'), lives: $('hLives'), wave: $('hWave'), alive: $('hAlive'),
-  bWave: $('bWave'), bPause: $('bPause'), bSpeed: $('bSpeed'),
+  gold: $('hGold'), lives: $('hLives'), wave: $('hWave'), alive: $('hAlive'), next: $('hNext'),
+  bShop: $('bShop'), bPause: $('bPause'), bSpeed: $('bSpeed'),
   board: $('board'), stage: $('stage'), cT: $('cTerrain'), cG: $('cGpu'), cU: $('cUi'),
   panel: $('panel'), toast: $('toast'),
-  menu: $('menu'), mPlay: $('mPlay'), mError: $('mError'),
+  menu: $('menu'), mPlay: $('mPlay'), mError: $('mError'), mResearch: $('mResearch'), mShop: $('mShop'), mShards: $('mShards'), mBest: $('mBest'),
   tree: $('tree'), treeBody: $('treeBody'), treeTitle: $('treeTitle'), treeGold: $('treeGold'), treeClose: $('treeClose'),
-  over: $('over'), oWave: $('oWave'), oKills: $('oKills'), oBest: $('oBest'), oRetry: $('oRetry'), oMenu: $('oMenu'),
+  over: $('over'), oWave: $('oWave'), oKills: $('oKills'), oBest: $('oBest'), oRetry: $('oRetry'), oMenu: $('oMenu'), oShards: $('oShards'), oResearch: $('oResearch'), oShop: $('oShop'),
 };
 
 const map = buildField();
 const build = makeBuildCheck(map);
 let gpu = null;
+const meta = loadMeta();
+let FX = effects(meta); // research bonuses for the current run
 
 const G = {
   running: false, paused: false, over: false, speed: 1,
   gold: 0, lives: 0, wave: 0, kills: 0,
-  towers: new Array(MAX_TOWERS).fill(null), // slot -> {kind, level, x, y}
+  towers: new Array(MAX_TOWERS).fill(null), // slot -> {kind, path, x, y, base, color, name, invested}
   towerCount: 0,                            // high-water mark for the GPU loop
   selected: -1,                             // tower slot
   spot: null,                               // {x, y} pending build location
@@ -32,12 +38,8 @@ const G = {
   nextIn: 0, queue: [], plan: null,
   ring: 0, spawned: 0, frame: 0, time: 0,
   seen: { kills: 0, gold: 0, leaks: 0 },
-  dirty: true,
+  seenKinds: new Set(),
 };
-
-const bestKey = 'towers-of-defense-best';
-const getBest = () => { try { return +localStorage.getItem(bestKey) || 0; } catch { return 0; } };
-const setBest = (v) => { try { localStorage.setItem(bestKey, String(v)); } catch { /* storage unavailable */ } };
 
 // ---------- layout ----------
 let scale = 1, dpr = 1;
@@ -106,9 +108,9 @@ function drawUi(time) {
     ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
   };
   if (G.selected >= 0 && G.towers[G.selected]) {
-    const t = G.towers[G.selected], d = TOWERS[t.kind], rg = towerStats(t.kind, t.path).range;
+    const t = G.towers[G.selected], rg = statsOf(t).range;
     ctx.fillStyle = 'rgba(230,237,243,0.04)'; ctx.beginPath(); ctx.arc(t.x, t.y, rg, 0, 6.2832); ctx.fill();
-    ring(t.x, t.y, rg, d.color, true, 0.8);
+    ring(t.x, t.y, rg, t.color, true, 0.8);
     ring(t.x, t.y, 21, '#e6edf3', false);
   }
   if (G.spot) {
@@ -133,18 +135,33 @@ function towerAt(x, y) {
   G.towers.forEach((t, i) => { if (t) { const d = Math.hypot(t.x - x, t.y - y); if (d < bd) { bd = d; best = i; } } });
   return best;
 }
+const hexRgb = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => v / 255); };
+const statsOf = (t) => towerStats(t.kind, t.path, t.base, FX);
+const upgradeCost = (kind, n) => discount(nodeCost(kind, n), FX.upgradeDisc);
+const sellValue = (t) => Math.floor(t.invested * (SELL_RATIO + FX.sell));
+
+// Everything the player can build right now: the four standard towers plus saved workshop designs.
+function buildOptions() {
+  const opts = TOWERS.map((d, kind) => ({ kind, name: d.name, color: d.color, blurb: d.blurb, base: d.base, cost: discount(d.cost, FX.towerDisc) }));
+  for (const raw of meta.designs.slice(0, FX.slots)) {
+    const d = sanitize(raw);
+    opts.push({ kind: d.kind, name: d.name, color: d.color, blurb: `Custom ${TOWERS[d.kind].name}`, base: designBase(d.kind, d.pts, d.perks),
+      cost: discount(designCost(d.kind, d.pts, d.perks), FX.towerDisc) });
+  }
+  return opts;
+}
 function syncTowers(resetSlot) {
   G.towerCount = 0;
   G.towers.forEach((t, i) => { if (t) G.towerCount = i + 1; });
-  gpu.uploadTowers(G.towers, resetSlot === undefined ? [] : [resetSlot]);
+  gpu.uploadTowers(G.towers.map((t) => t && { x: t.x, y: t.y, kind: t.kind, tier: t.path.length, stats: statsOf(t), color: hexRgb(t.color) }),
+    resetSlot === undefined ? [] : [resetSlot]);
 }
-function placeTower(kind) {
-  const d = TOWERS[kind];
-  if (!G.spot || G.gold < d.cost) return;
+function placeTower(opt) {
+  if (!G.spot || G.gold < opt.cost) return;
   const slot = G.towers.findIndex((t) => !t);
   if (slot < 0) return toast('Tower limit reached');
-  G.gold -= d.cost;
-  G.towers[slot] = { kind, path: [], x: G.spot.x, y: G.spot.y };
+  G.gold -= opt.cost;
+  G.towers[slot] = { kind: opt.kind, path: [], x: G.spot.x, y: G.spot.y, base: opt.base, color: opt.color, name: opt.name, invested: opt.cost };
   G.spot = null; G.selected = slot;
   syncTowers(slot); renderPanel(); updateHud();
 }
@@ -152,15 +169,15 @@ function buyNode(id) {
   const t = G.towers[G.selected]; if (!t) return;
   const n = choices(t.kind, t.path).find((c) => c.id === id);
   if (!n) return;
-  const cost = nodeCost(t.kind, n);
+  const cost = upgradeCost(t.kind, n);
   if (G.gold < cost) return toast('Not enough gold');
-  G.gold -= cost; t.path.push(id);
+  G.gold -= cost; t.invested += cost; t.path.push(id);
   syncTowers(); renderPanel(); renderTree(); updateHud();
 }
 function sellTower() {
   closeTree();
   const t = G.towers[G.selected]; if (!t) return;
-  G.gold += Math.floor(towerValue(t) * SELL_RATIO);
+  G.gold += sellValue(t);
   const slot = G.selected;
   G.towers[slot] = null; G.selected = -1;
   syncTowers(slot); renderPanel(); updateHud();
@@ -171,12 +188,13 @@ function refreshPanel() {
 function clearSelection() { G.spot = null; G.selected = -1; closeTree(); renderPanel(); }
 
 let toastTimer = 0;
-function toast(msg) {
+function toast(msg, ms = 1400) {
   el.toast.textContent = msg; el.toast.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.toast.classList.remove('show'), 1400);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.toast.classList.remove('show'), ms);
 }
 
 const DOT = ['', 'dia', '', 'sq'];
+function escapeHtml(x) { return String(x).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function renderPanel() {
   el.panel.innerHTML = '';
   const mkBtn = (cls, html, fn, cost = 0) => {
@@ -186,24 +204,25 @@ function renderPanel() {
   const showTop = (y) => { el.panel.className = y > WORLD_H * 0.52 ? 'top' : 'bottom'; };
   if (G.spot) {
     showTop(G.spot.y);
-    TOWERS.forEach((d, k) => mkBtn('tcard',
-      `<span class="dot ${DOT[k]}" style="border-color:${d.color}"></span><span class="nm">${d.name}</span><span class="cs">${d.cost}</span><small>${d.blurb}</small>`,
-      () => placeTower(k), d.cost));
+    for (const o of buildOptions()) {
+      mkBtn('tcard', `<span class="dot ${DOT[o.kind]}" style="border-color:${o.color}"></span><span class="nm">${escapeHtml(o.name)}</span><span class="cs">${o.cost}</span><small>${o.blurb}</small>`,
+        () => placeTower(o), o.cost);
+    }
   } else if (G.selected >= 0 && G.towers[G.selected]) {
-    const t = G.towers[G.selected], d = TOWERS[t.kind], st = towerStats(t.kind, t.path), opts = choices(t.kind, t.path);
+    const t = G.towers[G.selected], st = statsOf(t), opts = choices(t.kind, t.path);
     showTop(t.y);
     const info = document.createElement('div'); info.className = 'info';
     const last = t.path.length ? NODES[t.kind][t.path[t.path.length - 1]].name : 'Base';
-    info.innerHTML = `<b>${d.name}</b><span>${last}</span><span>${statLine(t.kind, st)}</span><span>range ${Math.round(st.range)}</span>`;
+    info.innerHTML = `<b>${escapeHtml(t.name)}</b><span>${last}</span><span>${statLine(t.kind, st)}</span><span>range ${Math.round(st.range)}</span>`;
     el.panel.appendChild(info);
     for (const n of opts) {
-      const c = nodeCost(t.kind, n);
+      const c = upgradeCost(t.kind, n);
       mkBtn('ucard', `<b>${n.name}</b><small>${n.desc}</small><span class="cs">${c}</span>`, () => buyNode(n.id), c);
     }
     if (opts.length > 1) { const h = document.createElement('div'); h.className = 'pick'; h.textContent = 'Pick one'; el.panel.insertBefore(h, el.panel.children[1]); }
     if (!opts.length) { const m = document.createElement('div'); m.className = 'info'; m.innerHTML = '<b>Fully upgraded</b>'; el.panel.appendChild(m); }
     mkBtn('abtn', 'Upgrade tree', openTree);
-    mkBtn('abtn', `Sell<b>+${Math.floor(towerValue(t) * SELL_RATIO)}</b>`, sellTower);
+    mkBtn('abtn', `Sell<b>+${sellValue(t)}</b>`, sellTower);
     mkBtn('abtn', 'Close', clearSelection);
   }
 }
@@ -215,9 +234,9 @@ function renderTree() {
   if (el.tree.classList.contains('hidden')) return;
   const t = G.towers[G.selected];
   if (!t) return closeTree();
-  const d = TOWERS[t.kind], tree = TREES[t.kind], N = NODES[t.kind];
+  const tree = TREES[t.kind], N = NODES[t.kind];
   const avail = new Set(choices(t.kind, t.path).map((n) => n.id));
-  el.treeTitle.textContent = `${d.name} upgrade tree`;
+  el.treeTitle.textContent = `${t.name} upgrade tree`;
   el.treeGold.textContent = Math.floor(G.gold);
   const state = (n) => {
     if (t.path.includes(n.id)) return 'owned';
@@ -229,7 +248,7 @@ function renderTree() {
     return 'future';
   };
   const card = (n, extra = '') => {
-    const st = state(n), cost = nodeCost(t.kind, n);
+    const st = state(n), cost = upgradeCost(t.kind, n);
     const dim = st === 'avail' && G.gold < cost ? ' dim' : '';
     const tag = st === 'owned' ? 'Owned' : st === 'out' ? 'Locked out' : cost;
     return `<button class="tnode ${st}${dim}" data-id="${n.id}" ${st === 'avail' ? '' : 'disabled'} style="${extra}"><b>${n.name}</b><small>${n.desc}</small><span class="cs">${tag}</span></button>`;
@@ -247,43 +266,48 @@ function renderTree() {
 }
 
 // ---------- waves ----------
-function launchWave(early) {
+function launchWave() {
   G.wave++;
   const spec = waveSpec(G.wave);
-  G.queue.push({ spec, emitted: [0, 0, 0, 0, 0], elapsed: 0 });
-  G.gold += 15 + 3 * G.wave;
-  if (early) G.gold += Math.floor(Math.max(0, G.nextIn) * 0.8);
+  G.queue.push({ spec, emitted: new Array(ENEMIES.length).fill(0), elapsed: 0 });
+  G.gold += WAVE_BONUS(G.wave) + FX.waveBonus;
   G.nextIn = WAVE_GAP;
+  // introduce each new enemy type once, the first time it shows up
+  for (let k = 1; k < ENEMIES.length; k++) {
+    if (spec.counts[k] > 0 && !G.seenKinds.has(k)) {
+      G.seenKinds.add(k);
+      if (k > 4) toast(`New enemy: ${ENEMIES[k].name}. ${ENEMIES[k].desc}`, 4200);
+    }
+  }
   updateHud();
 }
 
 function makeStep(dt) {
   G.time += dt; G.frame++;
-  if (G.nextIn > 0) { G.nextIn -= dt; if (G.nextIn <= 0) launchWave(false); }
+  if (G.nextIn > 0) { G.nextIn -= dt; if (G.nextIn <= 0) launchWave(); }
   if (!G.plan && G.queue.length) G.plan = G.queue.shift();
-  const counts = [0, 0, 0, 0];
-  let hpScale = 1;
+  const counts = new Array(12).fill(0);
+  let hpScale = 1, total = 0;
   if (G.plan) {
     const p = G.plan;
     p.elapsed += dt;
     const frac = Math.min(1, p.elapsed / p.spec.duration);
-    for (let k = 1; k <= 4; k++) {
+    for (let k = 1; k < ENEMIES.length; k++) {
       const due = Math.floor(p.spec.counts[k] * frac) - p.emitted[k];
-      if (due > 0) { counts[k - 1] = due; p.emitted[k] += due; }
+      if (due > 0) { counts[k] = due; p.emitted[k] += due; total += due; }
     }
     hpScale = p.spec.hpScale;
     if (frac >= 1) G.plan = null;
   }
-  const total = counts[0] + counts[1] + counts[2] + counts[3];
   const spawnStart = G.ring;
   G.ring = (G.ring + total) % MAX_ENEMIES;
   G.spawned += total;
   return {
-    dt, time: G.time, spawnStart, numTowers: G.towerCount, hpScale, goldMult: curGoldMult(),
+    dt, time: G.time, spawnStart, numTowers: G.towerCount, hpScale, goldMult: curGoldMult(), spdScale: 1 - FX.enemySlow,
     spawnY0: map.spawnY0, spawnY1: map.spawnY1, maxUsed: Math.min(MAX_ENEMIES, G.spawned), frame: G.frame, counts,
   };
 }
-function curGoldMult() { return waveSpec(Math.max(1, G.wave)).goldMult; }
+function curGoldMult() { return waveSpec(Math.max(1, G.wave)).goldMult * (1 + FX.bounty); }
 
 // ---------- HUD ----------
 function updateHud() {
@@ -291,9 +315,7 @@ function updateHud() {
   el.lives.textContent = G.lives; el.lives.classList.toggle('warn', G.lives <= 5);
   el.wave.textContent = G.wave;
   el.alive.textContent = gpu ? gpu.alive : 0;
-  if (!G.running) return;
-  if (G.wave === 0) el.bWave.textContent = `Start wave 1  ${Math.max(0, Math.ceil(G.nextIn))}s`;
-  else el.bWave.textContent = `Next wave ${G.wave + 1}  ${Math.max(0, Math.ceil(G.nextIn))}s`;
+  el.next.textContent = G.running ? `${Math.max(0, Math.ceil(G.nextIn))}s` : '-';
 }
 let lastGoldShown = -1;
 
@@ -308,12 +330,13 @@ function pullCounters() {
 
 // ---------- flow ----------
 function newGame() {
+  FX = effects(meta);
   gpu.reset();
   Object.assign(G, {
-    running: true, paused: false, over: false, speed: 1, gold: START_GOLD, lives: START_LIVES, wave: 0, kills: 0,
+    running: true, paused: false, over: false, speed: 1, gold: START_GOLD + FX.startGold, lives: START_LIVES + FX.lives, wave: 0, kills: 0,
     towers: new Array(MAX_TOWERS).fill(null), towerCount: 0, selected: -1, spot: null, hover: null,
     nextIn: FIRST_WAVE_DELAY, queue: [], plan: null, ring: 0, spawned: 0, frame: 0, time: 0,
-    seen: { kills: 0, gold: 0, leaks: 0 },
+    seen: { kills: 0, gold: 0, leaks: 0 }, seenKinds: new Set(),
   });
   el.bSpeed.textContent = '1x'; el.bPause.textContent = 'Pause';
   el.menu.classList.add('hidden'); el.over.classList.add('hidden');
@@ -321,12 +344,28 @@ function newGame() {
 }
 function gameOver() {
   G.over = true;
-  const best = Math.max(getBest(), G.wave);
-  setBest(best);
-  el.oWave.textContent = G.wave; el.oKills.textContent = G.kills; el.oBest.textContent = best;
+  const earned = shardsFor(G.wave, G.kills);
+  meta.shards += earned;
+  meta.best = Math.max(meta.best || 0, G.wave);
+  saveMeta(meta);
+  el.oWave.textContent = G.wave; el.oKills.textContent = G.kills; el.oBest.textContent = meta.best; el.oShards.textContent = `+${earned}`;
   clearSelection();
   setTimeout(() => el.over.classList.remove('hidden'), 500);
 }
+function refreshMenu() {
+  el.mShards.textContent = meta.shards;
+  el.mBest.textContent = meta.best ? `Best wave ${meta.best}` : '';
+}
+
+const research = initResearch({ root: $('research'), body: $('resBody'), points: $('resPoints'), close: $('resClose'), meta,
+  onChange: () => { FX = effects(meta); refreshMenu(); } });
+const shop = initWorkshop({ root: $('workshop'), body: $('wsBody'), slotsEl: $('wsSlots'), close: $('wsClose'), meta, getFx: () => FX,
+  onChange: () => { if (G.spot) renderPanel(); } });
+let pausedByShop = false;
+shop.onClose = () => { if (G.over) el.over.classList.remove('hidden'); if (pausedByShop) { G.paused = false; pausedByShop = false; el.bPause.textContent = 'Pause'; } renderPanel(); };
+$('resClose').addEventListener('click', () => { if (G.over) el.over.classList.remove('hidden'); });
+const openResearch = () => { el.over.classList.add('hidden'); research.open(); };
+const openShop = () => { shop.open(); };
 
 let lastT = performance.now();
 function loop(now) {
@@ -341,7 +380,7 @@ function loop(now) {
     gpu.frame(steps, { time: now / 1000 });
     if (G.running) pullCounters();
     const gShown = Math.floor(G.gold);
-    if (gShown !== lastGoldShown) { lastGoldShown = gShown; refreshPanel(); if (!el.tree.classList.contains('hidden')) { el.treeGold.textContent = gShown; for (const b of el.treeBody.querySelectorAll('button.tnode.avail')) b.classList.toggle('dim', G.gold < nodeCost(G.towers[G.selected].kind, NODES[G.towers[G.selected].kind][b.dataset.id])); } }
+    if (gShown !== lastGoldShown) { lastGoldShown = gShown; refreshPanel(); if (!el.tree.classList.contains('hidden')) { el.treeGold.textContent = gShown; for (const b of el.treeBody.querySelectorAll('button.tnode.avail')) b.classList.toggle('dim', G.gold < upgradeCost(G.towers[G.selected].kind, NODES[G.towers[G.selected].kind][b.dataset.id])); } }
     updateHud();
     drawUi(now / 1000);
   }
@@ -370,12 +409,19 @@ el.cU.addEventListener('pointermove', (e) => { G.hover = e.pointerType === 'mous
 el.cU.addEventListener('pointerleave', () => { G.hover = null; });
 
 el.treeClose.addEventListener('click', closeTree);
-el.bWave.addEventListener('click', () => { if (G.running && !G.over) launchWave(true); });
+el.bShop.addEventListener('click', () => {
+  if (G.running && !G.over && !G.paused) { G.paused = true; pausedByShop = true; el.bPause.textContent = 'Resume'; }
+  openShop();
+});
+el.mResearch.addEventListener('click', openResearch);
+el.mShop.addEventListener('click', openShop);
+el.oResearch.addEventListener('click', openResearch);
+el.oShop.addEventListener('click', () => { el.over.classList.add('hidden'); openShop(); });
 el.bPause.addEventListener('click', () => { G.paused = !G.paused; el.bPause.textContent = G.paused ? 'Resume' : 'Pause'; });
 el.bSpeed.addEventListener('click', () => { G.speed = G.speed >= 3 ? 1 : G.speed + 1; el.bSpeed.textContent = `${G.speed}x`; });
 el.mPlay.addEventListener('click', newGame);
 el.oRetry.addEventListener('click', newGame);
-el.oMenu.addEventListener('click', () => { el.over.classList.add('hidden'); el.menu.classList.remove('hidden'); G.running = false; });
+el.oMenu.addEventListener('click', () => { el.over.classList.add('hidden'); el.menu.classList.remove('hidden'); G.running = false; refreshMenu(); updateHud(); });
 window.addEventListener('keydown', (e) => { if (e.code === 'Space') { e.preventDefault(); el.bPause.click(); } if (e.code === 'Escape') clearSelection(); });
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 
@@ -385,7 +431,7 @@ resize();
   try {
     gpu = await createGpu(el.cG, map);
     gpu.reset();
-    el.mPlay.disabled = false; el.mPlay.textContent = 'Play';
+    el.mPlay.disabled = false; el.mPlay.textContent = 'Play'; refreshMenu();
   } catch (err) {
     console.error(err);
     el.mError.textContent = `${err.message || err} Try Safari on iPadOS 26 or a current Chrome or Edge.`;
@@ -394,4 +440,5 @@ resize();
   }
   requestAnimationFrame(loop);
 })();
-window.__tod = { G, get gpu() { return gpu; }, map, newGame, launchWave, makeStep, pullCounters, updateHud };
+refreshMenu();
+window.__tod = { gameOver, G, meta, get FX() { return FX; }, get gpu() { return gpu; }, map, newGame, launchWave, makeStep, pullCounters, updateHud, syncTowers, statsOf };

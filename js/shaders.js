@@ -1,4 +1,4 @@
-import { ENEMIES, TOWERS, WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS } from './data.js';
+import { ENEMIES, WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, ENEMY_KINDS } from './data.js';
 import { FW, FH, CELL } from './map.js';
 
 export const GRID_CELL = 24;
@@ -7,10 +7,10 @@ export const GW = Math.ceil(WORLD_W / GRID_CELL);
 export const GH = Math.ceil(WORLD_H / GRID_CELL);
 
 // Byte layouts shared with gpu.js
-export const ENEMY_STRIDE = 48;  // pos2 vel2 hp maxhp kind burn burnDps seed slow spread
-export const TCFG_STRIDE = 72;   // pos2 kind level range dmg rate radius live flight splash pierce pct slow ignite spread ramp pad
+export const ENEMY_STRIDE = 56;  // pos2 vel2 hp maxhp kind burn burnDps seed slow spread shield shieldT
+export const TCFG_STRIDE = 80;   // pos2 kind level range dmg rate radius live flight splash pierce pct slow ignite spread ramp r g b
 export const TSTATE_STRIDE = 64; // aim2 tgt2 shellTo2 boomPos2 cd fire shellT boom evt tgtIdx heat pad
-export const PARAM_FLOATS = 16;
+export const PARAM_FLOATS = 24;
 
 const f = (n) => Number(n).toFixed(3);
 const arr = (a) => `array<f32,${a.length}>(${a.map(f).join(',')})`;
@@ -31,24 +31,29 @@ const FCELL = ${f(CELL)};
 struct Params {
   dt: f32, time: f32, spawnStart: u32, numTowers: u32,
   hpScale: f32, goldMult: f32, spawnY0: f32, spawnY1: f32,
-  maxUsed: u32, frame: u32, c1: u32, c2: u32,
-  c3: u32, c4: u32, pad0: u32, pad1: u32,
+  maxUsed: u32, frame: u32, spdScale: f32, pad0: u32,
+  counts: array<vec4<u32>, 3>, // spawn count per enemy kind, indexed by kind
 };
-struct Enemy { pos: vec2f, vel: vec2f, hp: f32, maxhp: f32, kind: u32, burn: f32, burnDps: f32, seed: f32, slow: f32, spread: f32 };
+struct Enemy { pos: vec2f, vel: vec2f, hp: f32, maxhp: f32, kind: u32, burn: f32, burnDps: f32, seed: f32, slow: f32, spread: f32, shield: f32, shieldT: f32 };
 struct Tower {
   pos: vec2f, kind: u32, level: u32, range: f32, dmg: f32, rate: f32, radius: f32, live: u32,
-  flight: f32, splash: f32, pierce: f32, pct: f32, slow: f32, ignite: f32, spread: f32, ramp: f32, pad: f32,
+  flight: f32, splash: f32, pierce: f32, pct: f32, slow: f32, ignite: f32, spread: f32, ramp: f32, cr: f32, cg: f32, cb: f32,
 };
 struct TState {
   aim: vec2f, tgt: vec2f, shellTo: vec2f, boomPos: vec2f,
   cd: f32, fire: f32, shellT: f32, boom: f32, evt: u32, tgtIdx: u32, heat: f32, pad: f32,
 };
 
-var<private> E_RAD: array<f32,5> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.radius)])};
-var<private> E_SPD: array<f32,5> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.speed)])};
-var<private> E_HP: array<f32,5> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.hp)])};
-var<private> E_LEAK: array<u32,5> = array<u32,5>(0u, ${ENEMIES.slice(1).map((e) => e.leak + 'u').join(',')});
-var<private> E_REW: array<f32,5> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.reward)])};
+const NK = ${ENEMY_KINDS}u;
+var<private> E_RAD: array<f32,${ENEMIES.length}> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.radius)])};
+var<private> E_SPD: array<f32,${ENEMIES.length}> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.speed)])};
+var<private> E_HP: array<f32,${ENEMIES.length}> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.hp)])};
+var<private> E_ARM: array<f32,${ENEMIES.length}> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.armor)])};
+var<private> E_LEAK: array<u32,${ENEMIES.length}> = array<u32,${ENEMIES.length}>(0u, ${ENEMIES.slice(1).map((e) => e.leak + 'u').join(',')});
+var<private> E_REW: array<f32,${ENEMIES.length}> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.reward)])};
+
+// phantoms blink out of reach for a third of a cycle, on the simulation clock
+fn isPhased(e: Enemy, t: f32) -> bool { return e.kind == 8u && fract(t * 0.33 + e.seed * 7.0) < 0.3; }
 `;
 
 export const COMPUTE = COMMON + /* wgsl */`
@@ -122,7 +127,7 @@ fn towers(@builtin(global_invocation_id) gid: vec3u) {
   let minR = select(0.0, 70.0, c.kind == 3u);
   for (var i = 0u; i < P.maxUsed; i++) {
     let e = enemiesIn[i];
-    if (e.kind == 0u) { continue; }
+    if (e.kind == 0u || isPhased(e, P.time)) { continue; }
     let d = distance(e.pos, c.pos);
     if (d > c.range || d < minR) { continue; }
     var score = e.pos.x;
@@ -172,10 +177,14 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
 
   if (e.kind == 0u) {
     let rel = (i + MAXE - P.spawnStart) % MAXE;
-    let total = P.c1 + P.c2 + P.c3 + P.c4;
-    if (rel < total) {
-      var k = 4u;
-      if (rel < P.c1) { k = 1u; } else if (rel < P.c1 + P.c2) { k = 2u; } else if (rel < P.c1 + P.c2 + P.c3) { k = 3u; }
+    var total = 0u;
+    var k = 0u;
+    for (var q = 1u; q <= NK; q++) {
+      let cq = P.counts[q / 4u][q % 4u];
+      if (rel >= total && rel < total + cq) { k = q; }
+      total += cq;
+    }
+    if (rel < total && k != 0u) {
       let h1 = hash(i * 7u + P.frame * 13u);
       let h2 = hash(i * 131u + P.frame * 17u + 5u);
       let h3 = hash(i * 977u + P.frame * 29u + 11u);
@@ -185,6 +194,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
       e.maxhp = E_HP[k] * P.hpScale;
       e.hp = e.maxhp;
       e.burn = 0.0; e.burnDps = 0.0; e.seed = h3; e.slow = 0.0; e.spread = 0.0;
+      e.shield = select(0.0, e.maxhp * 0.6, k == 9u); e.shieldT = 0.0;
     }
     enemiesOut[i] = e;
     return;
@@ -231,6 +241,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
       if (d < c.radius + r) { hit = true; amt = c.dmg * (1.0 - 0.5 * d / (c.radius + r)); }
     }
     if (hit) {
+      if (c.kind == 0u || c.kind == 3u) { amt = max(amt - E_ARM[k], amt * 0.3); }
       dmg += amt + c.pct * e.maxhp * tick;
       slowIn = max(slowIn, c.slow);
       if (c.ignite > 0.0) {
@@ -241,6 +252,21 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
   e.slow = max(e.slow - P.dt * 0.5, slowIn);
+  let phased = isPhased(e, P.time);
+  if (phased) { dmg = 0.0; }
+  // shields soak direct damage, then regrow once left alone; burning ignores them
+  if (k == 9u) {
+    let cap = e.maxhp * 0.6;
+    if (dmg > 0.0) {
+      let soak = min(e.shield, dmg);
+      e.shield -= soak; dmg -= soak; e.shieldT = 0.0;
+    } else {
+      e.shieldT += P.dt;
+      if (e.shieldT > 2.5) { e.shield = min(cap, e.shield + cap * 0.25 * P.dt); }
+    }
+  } else if (k == 8u) {
+    e.shieldT = select(0.0, 1.0, phased); // render flag: faded while out of reach
+  }
   if (e.burn > 0.0) {
     dmg += e.burnDps * P.dt;
     e.burn -= P.dt;
@@ -264,6 +290,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
   // crowd separation through the spatial grid
   var push = vec2f(0.0);
   var catchDps = 0.0;
+  var healed = false;
   var catchSpread = 0.0;
   let cc = cellOf(e.pos);
   for (var dy = -1; dy <= 1; dy++) {
@@ -279,6 +306,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
         let d = e.pos - o.pos;
         let rr = r + E_RAD[o.kind];
         let d2 = dot(d, d);
+        if (o.kind == 7u && d2 < (rr + 20.0) * (rr + 20.0)) { healed = true; }
         if (o.burn > 0.0 && o.spread > 0.5 && d2 < (rr + 9.0) * (rr + 9.0)) {
           catchDps = max(catchDps, o.burnDps * 0.8);
           catchSpread = max(catchSpread, o.spread - 0.34);
@@ -295,6 +323,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
 
+  if (healed) { e.hp = min(e.maxhp, e.hp + e.maxhp * 0.07 * P.dt); }
   if (catchDps > 0.0 && e.burn <= 0.5) { e.burn = 2.0; e.burnDps = catchDps; e.spread = catchSpread; }
   let f = sampleField(e.pos);
   var dir = f.xy;
@@ -305,7 +334,8 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
   let ang = ((e.seed - 0.5) * 1.1 + 0.45 * sin(P.time * 0.7 + e.seed * 60.0)) * room;
   let sa = sin(ang); let ca = cos(ang);
   let wdir = vec2f(dir.x * ca - dir.y * sa, dir.x * sa + dir.y * ca);
-  let spd = E_SPD[k] * (0.86 + 0.28 * e.seed) * (1.0 - clamp(e.slow, 0.0, 0.75));
+  let rage = select(1.0, 1.0 + (1.0 - clamp(e.hp / e.maxhp, 0.0, 1.0)) * 1.3, k == 10u);
+  let spd = E_SPD[k] * (0.86 + 0.28 * e.seed) * (1.0 - clamp(e.slow, 0.0, 0.75)) * rage * P.spdScale;
   let desired = wdir * spd + push * spd * 3.5;
   e.vel = mix(e.vel, desired, 1.0 - exp(-P.dt * 9.0));
   e.pos += e.vel * P.dt;
@@ -336,10 +366,8 @@ struct View { sx: f32, sy: f32, aa: f32, time: f32 };
 
 var<private> CORNERS: array<vec2f,6> = array<vec2f,6>(
   vec2f(-1.0,-1.0), vec2f(1.0,-1.0), vec2f(-1.0,1.0), vec2f(-1.0,1.0), vec2f(1.0,-1.0), vec2f(1.0,1.0));
-var<private> E_COL: array<vec3f,5> = array<vec3f,5>(vec3f(0.0),
+var<private> E_COL: array<vec3f,${ENEMIES.length}> = array<vec3f,${ENEMIES.length}>(vec3f(0.0),
   ${ENEMIES.slice(1).map((e) => `vec3f(${hex(e.color)})`).join(',')});
-var<private> T_COL: array<vec3f,4> = array<vec3f,4>(
-  ${TOWERS.map((t) => `vec3f(${hex(t.color)})`).join(',')});
 
 fn toClip(w: vec2f) -> vec4f { return vec4f(w.x * V.sx - 1.0, 1.0 - w.y * V.sy, 0.0, 1.0); }
 fn cross2(a: vec2f, b: vec2f) -> f32 { return a.x * b.y - a.y * b.x; }
@@ -363,7 +391,7 @@ fn vsEnemy(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
   let e = en[ii];
   if (e.kind == 0u) { o.pos = vec4f(3.0, 3.0, 0.0, 1.0); return o; }
   let rad = E_RAD[e.kind];
-  let hs = rad + 9.0;
+  let hs = rad + 10.0;
   let c = CORNERS[vi];
   o.pos = toClip(e.pos + c * hs);
   o.uv = c * hs;
@@ -373,7 +401,10 @@ fn vsEnemy(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
   col = mix(col, vec3f(0.45, 0.72, 1.0), clamp(e.slow, 0.0, 0.75) * 0.8);
   if (e.burn > 0.0) { col = mix(col, vec3f(1.0, 0.5, 0.18), 0.55 + 0.25 * sin(V.time * 30.0 + e.seed * 50.0)); }
   o.col = vec4f(col, 1.0);
-  o.misc = vec4f(rad, hpf, f32(e.kind), 0.0);
+  let shieldFrac = select(0.0, clamp(e.shield / (e.maxhp * 0.6), 0.0, 1.0), e.kind == 9u);
+  let faded = select(1.0, 0.22, e.kind == 8u && e.shieldT > 0.5);
+  o.col = vec4f(col, faded);
+  o.misc = vec4f(rad, hpf, select(0.0, 1.0, e.maxhp >= 80.0), shieldFrac);
   return o;
 }
 
@@ -384,8 +415,13 @@ fn fsEnemy(i: EOut) -> @location(0) vec4f {
   var a = 1.0 - smoothstep(-V.aa, V.aa, d);
   var col = i.col.rgb;
   col = mix(col, col * 0.42, smoothstep(-1.6, -0.6, d));
-  if (i.misc.z >= 3.0 && i.misc.y < 0.999) {
-    let by = -(rad + 5.0);
+  if (i.misc.w > 0.02) {
+    let ring = (1.0 - smoothstep(-V.aa, V.aa, abs(d - 2.2) - 0.9)) * (0.35 + 0.65 * i.misc.w);
+    col = mix(col, vec3f(0.55, 0.95, 1.0), ring);
+    a = max(a, ring * 0.9);
+  }
+  if (i.misc.z > 0.5 && i.misc.y < 0.999) {
+    let by = -(rad + 6.0);
     let w = max(rad, 7.0) * 1.1;
     let inBar = step(abs(i.uv.x), w) * step(abs(i.uv.y - by), 1.4);
     let fill = step(i.uv.x, -w + 2.0 * w * i.misc.y);
@@ -393,6 +429,7 @@ fn fsEnemy(i: EOut) -> @location(0) vec4f {
     col = mix(col, bar, inBar);
     a = max(a, inBar);
   }
+  a = a * i.col.a;
   return vec4f(col * a, a);
 }
 
@@ -423,7 +460,7 @@ fn sdBox(p: vec2f, b: vec2f, r: f32) -> f32 {
 fn fsTower(i: TOut) -> @location(0) vec4f {
   let c = tc[i.idx];
   let s = ts[i.idx];
-  let col = T_COL[c.kind];
+  let col = vec3f(c.cr, c.cg, c.cb);
   var aim = s.aim;
   if (dot(aim, aim) < 0.5) { aim = vec2f(1.0, 0.0); }
   let p = i.uv;
@@ -495,7 +532,7 @@ fn disc(p: vec2f, c: vec2f, r: f32) -> f32 { return 1.0 - smoothstep(-V.aa, V.aa
 fn fsFx(i: FOut) -> @location(0) vec4f {
   let c = tc[i.idx];
   let s = ts[i.idx];
-  let col = T_COL[c.kind];
+  let col = vec3f(c.cr, c.cg, c.cb);
   let p = i.wp;
   var rgb = vec3f(0.0);
   var a = 0.0;
