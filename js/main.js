@@ -1,4 +1,4 @@
-import { W, H, COLS, ROWS, TILE, TOWERS, TOWER_ORDER, TARGET_MODES, MAX_LEVEL, TECH, BRANCHES } from './data.js';
+import { W, H, TOWERS, TOWER_ORDER, TARGET_MODES, MAX_LEVEL, TECH, BRANCHES } from './data.js';
 import { Game } from './sim.js';
 import { Renderer } from './render.js';
 import { loadMeta, saveMeta, computeMods, techStatus, buyTech } from './meta.js';
@@ -9,14 +9,14 @@ const canvas = $('#c'), stage = $('#stage'), panel = $('#panel');
 const renderer = new Renderer(canvas);
 
 let game = null, state = 'menu';
-const ui = { selTile: null, selTower: null, paused: false };
+const ui = { selPoint: null, selTower: null, paused: false };
 let speed = 1;
 
 // ---------- layout ----------
 function layout() {
   const w = stage.clientWidth, h = stage.clientHeight;
   const cssW = Math.floor(Math.min(w, h * W / H));
-  renderer.resize(Math.max(cssW, 100), 0);
+  renderer.resize(Math.max(cssW, 100));
 }
 new ResizeObserver(layout).observe(stage);
 
@@ -56,7 +56,7 @@ function renderTech() {
 // ---------- run lifecycle ----------
 function startRun() {
   game = new Game(computeMods(meta.levels), (Math.random() * 1e9) | 0);
-  ui.selTile = ui.selTower = null; ui.paused = false; speed = 1; acc = 0;
+  ui.selPoint = ui.selTower = null; ui.paused = false; speed = 1; acc = 0;
   state = 'play';
   hide('#menu'); hide('#tech'); hide('#over');
   layout();
@@ -92,21 +92,19 @@ canvas.addEventListener('pointerdown', e => {
   if (state !== 'play') return;
   const r = canvas.getBoundingClientRect();
   const px = (e.clientX - r.left) / r.width * W, py = (e.clientY - r.top) / r.height * H;
-  const c = Math.floor(px / TILE), q = Math.floor(py / TILE);
-  if (c < 0 || c >= COLS || q < 0 || q >= ROWS) return;
-  const t = game.cells[q * COLS + c];
-  if (t) { ui.selTower = t; ui.selTile = null; }
-  else if (game.canPlace(c, q)) { ui.selTile = { c, q: q, r: q }; ui.selTower = null; }
-  else { ui.selTile = ui.selTower = null; }
+  const t = game.towerAt(px, py, 18);
+  if (t) { ui.selTower = t; ui.selPoint = null; }
+  else if (game.canPlace(px, py)) { ui.selPoint = { x: px, y: py }; ui.selTower = null; }
+  else { ui.selPoint = ui.selTower = null; }
 });
 
 panel.addEventListener('pointerdown', e => {
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled || state !== 'play') return;
   const act = el.dataset.act;
-  if (act === 'build' && ui.selTile) {
-    const t = game.build(el.dataset.type, ui.selTile.c, ui.selTile.r);
-    if (t) { ui.selTile = null; ui.selTower = t; }
+  if (act === 'build' && ui.selPoint) {
+    const t = game.build(el.dataset.type, ui.selPoint.x, ui.selPoint.y);
+    if (t) { ui.selPoint = null; ui.selTower = t; }
   } else if (act === 'up' && ui.selTower) game.upgrade(ui.selTower);
   else if (act === 'sell' && ui.selTower) { game.sell(ui.selTower); ui.selTower = null; }
   else if (act === 'mode' && ui.selTower) ui.selTower.mode = (ui.selTower.mode + 1) % TARGET_MODES.length;
@@ -118,12 +116,12 @@ const cache = {};
 function setText(id, v) { if (cache[id] !== v) { cache[id] = v; $(id).textContent = v; } }
 let lastPanel = '';
 function panelHTML() {
-  if (ui.selTile) {
+  if (ui.selPoint) {
     return TOWER_ORDER.map(type => {
-      const d = TOWERS[type], locked = !game.isUnlocked(type), dim = game.gold < d.cost;
+      const d = TOWERS[type], cost = game.towerCost(type), locked = !game.isUnlocked(type), dim = game.gold < cost;
       return `<button class="tbtn ${dim ? 'dim' : ''}" data-act="build" data-type="${type}" ${locked || dim ? 'disabled' : ''}>` +
         `<span class="ic">${locked ? '🔒' : d.icon}</span><span class="nm">${d.name}</span>` +
-        (locked ? `<small>Research</small>` : `<span class="cs">${d.cost}</span>`) + `</button>`;
+        (locked ? `<small>Research</small>` : `<span class="cs">${cost}</span>`) + `</button>`;
     }).join('');
   }
   const t = ui.selTower;
@@ -137,7 +135,7 @@ function panelHTML() {
       `<button class="abtn" data-act="mode" ${t.type === 'frost' ? 'disabled' : ''}>Target<b>${TARGET_MODES[t.mode]}</b></button>` +
       `<button class="abtn" data-act="sell">Sell<b>+${game.sellValue(t)}</b></button>`;
   }
-  return `<div class="hint">Tap a grass tile to build,<br>or a tower to upgrade it.</div>`;
+  return `<div class="hint">Tap anywhere in the cave to place a tower,<br>or tap a tower to upgrade it.</div>`;
 }
 function updateHud() {
   setText('#hGold', String(Math.floor(game.gold)));
@@ -146,7 +144,7 @@ function updateHud() {
   setText('#hAlive', String(game.n));
   const b = $('#bWave');
   const label = game.spawning ? `Wave ${game.wave} incoming…`
-    : `▶ Wave ${game.wave + 1} in ${Math.ceil(game.countdown)}s  (+${Math.ceil(game.countdown) * 2}🪙)`;
+    : `▶ Wave ${game.wave + 1} in ${Math.ceil(game.countdown)}s  (+${Math.ceil(game.countdown)}🪙)`;
   if (cache.wave !== label) { cache.wave = label; b.textContent = label; }
   b.disabled = game.spawning;
   const html = panelHTML();

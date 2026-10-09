@@ -1,72 +1,8 @@
-// Static game data: map, path, goblins, towers, tech tree, wave formulas.
+// Static game data: world size, balls, towers, tech tree, wave formulas.
 
-export const COLS = 9, ROWS = 13, TILE = 40;
-export const W = COLS * TILE, H = ROWS * TILE;
+export const W = 360, H = 520;
 
-// Waypoints in tile coordinates (centre of tile). First/last are off-screen.
-export const WAYPOINTS = [[-1, 1], [7, 1], [7, 4], [1, 4], [1, 7], [7, 7], [7, 10], [1, 10], [1, 13]];
-
-const wpPx = WAYPOINTS.map(([c, r]) => [(c + 0.5) * TILE, (r + 0.5) * TILE]);
-export const SEG_N = wpPx.length - 1;
-export const SEG_X0 = new Float32Array(SEG_N);
-export const SEG_Y0 = new Float32Array(SEG_N);
-export const SEG_DX = new Float32Array(SEG_N);
-export const SEG_DY = new Float32Array(SEG_N);
-export const SEG_START = new Float32Array(SEG_N);
-export let PATH_LEN = 0;
-for (let i = 0; i < SEG_N; i++) {
-  const [x0, y0] = wpPx[i], [x1, y1] = wpPx[i + 1];
-  SEG_X0[i] = x0; SEG_Y0[i] = y0;
-  SEG_DX[i] = Math.sign(x1 - x0); SEG_DY[i] = Math.sign(y1 - y0);
-  SEG_START[i] = PATH_LEN;
-  PATH_LEN += Math.abs(x1 - x0) + Math.abs(y1 - y0);
-}
-export const WP_PX = wpPx;
-
-// Cells occupied by the path (not buildable).
-export const PATH_CELLS = new Uint8Array(COLS * ROWS);
-for (let i = 0; i < WAYPOINTS.length - 1; i++) {
-  let [c, r] = WAYPOINTS[i];
-  const [c1, r1] = WAYPOINTS[i + 1];
-  const dc = Math.sign(c1 - c), dr = Math.sign(r1 - r);
-  for (;;) {
-    if (c >= 0 && c < COLS && r >= 0 && r < ROWS) PATH_CELLS[r * COLS + c] = 1;
-    if (c === c1 && r === r1) break;
-    c += dc; r += dr;
-  }
-}
-
-export const GOBLINS = [
-  { name: 'Grunt',   hp: 1,    speed: 1,    bounty: 1,  leak: 1,  r: 7,  color: '#6ab04c' },
-  { name: 'Scout',   hp: 0.55, speed: 1.7,  bounty: 1,  leak: 1,  r: 6,  color: '#b8e04a' },
-  { name: 'Brute',   hp: 4,    speed: 0.7,  bounty: 3,  leak: 2,  r: 10, color: '#2f8a3c' },
-  { name: 'Warlord', hp: 45,   speed: 0.55, bounty: 40, leak: 10, r: 14, color: '#9b59b6' },
-];
-export const BASE_SPEED = 40; // px / s
-
-export const TOWERS = {
-  arrow:  { name: 'Archer', icon: '🏹', color: '#d4a24c', cost: 50,  range: 100, dmg: 9,  rate: 2.6,
-            desc: 'Fast single target' },
-  cannon: { name: 'Cannon', icon: '💣', color: '#7f8c8d', cost: 110, range: 88,  dmg: 26, rate: 0.85, splash: 34,
-            desc: 'Splash damage' },
-  frost:  { name: 'Frost',  icon: '❄️', color: '#5dade2', cost: 80,  range: 78,  dmg: 2,  rate: 1.3, slow: 0.35,
-            desc: 'Slows everything in range', unlock: 'frost' },
-  tesla:  { name: 'Tesla',  icon: '⚡', color: '#f4d03f', cost: 190, range: 92,  dmg: 20, rate: 1.25, chain: 3,
-            desc: 'Chain lightning', unlock: 'tesla' },
-};
-export const TOWER_ORDER = ['arrow', 'cannon', 'frost', 'tesla'];
-export const MAX_LEVEL = 5;
-export const TARGET_MODES = ['First', 'Strongest', 'Closest'];
-export const upgradeCost = (type, lvl) => Math.round(TOWERS[type].cost * (0.7 + 0.5 * lvl));
-export const SELL_RATIO = 0.7;
-
-// ---- waves (infinite) ----
-export const MAX_ON_WAVE = 300;
-export const waveCount = n => Math.min(MAX_ON_WAVE, Math.floor(8 + 5 * n + 0.12 * n * n));
-export const waveHp = n => 14 * Math.pow(1.15, n - 1);
-export const waveBounty = n => 1.5 + 0.07 * n;
-
-function mulberry32(a) {
+export function mulberry32(a) {
   return function () {
     a |= 0; a = a + 0x6D2B79F5 | 0;
     let t = Math.imul(a ^ a >>> 15, 1 | a);
@@ -74,6 +10,41 @@ function mulberry32(a) {
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
+
+// "Goblins" are physics balls. r = radius (mass ~ r^2), drag = air-drag multiplier (lower = falls faster).
+export const GOBLINS = [
+  { name: 'Grunt',   hp: 1,    bounty: 1, leak: 1,  r: 6,  drag: 1,    color: '#4caf50' },
+  { name: 'Scout',   hp: 0.55, bounty: 1, leak: 1,  r: 5,  drag: 0.65, color: '#ffeb3b' },
+  { name: 'Brute',   hp: 4,    bounty: 3, leak: 2,  r: 9,  drag: 1.25, color: '#ff9800' },
+  { name: 'Warlord', hp: 45,   bounty: 40, leak: 10, r: 13, drag: 1.4,  color: '#b052d6' },
+];
+
+// Towers are free-placed anywhere, never collide with balls. push/blast = physics impulses (px/s).
+export const TOWERS = {
+  arrow:  { name: 'Archer', icon: '🏹', color: '#d4a24c', cost: 100, range: 100, dmg: 9,  rate: 2.6, push: 25,
+            desc: 'Fast shots, nudges balls' },
+  cannon: { name: 'Cannon', icon: '💣', color: '#7f8c8d', cost: 220, range: 90,  dmg: 26, rate: 0.85, splash: 38, blast: 170,
+            desc: 'Explosion blasts balls away' },
+  frost:  { name: 'Frost',  icon: '❄️', color: '#5dade2', cost: 160, range: 80,  dmg: 2,  rate: 1.3, slow: 0.35,
+            desc: 'Slows everything in range', unlock: 'frost' },
+  tesla:  { name: 'Tesla',  icon: '⚡', color: '#f4d03f', cost: 380, range: 92,  dmg: 20, rate: 1.25, chain: 3,
+            desc: 'Chain lightning, jolts balls', unlock: 'tesla' },
+};
+export const TOWER_ORDER = ['arrow', 'cannon', 'frost', 'tesla'];
+export const MAX_LEVEL = 5;
+export const TARGET_MODES = ['Lowest', 'Strongest', 'Closest'];
+export const upgradeCost = (type, lvl) => Math.round(TOWERS[type].cost * (0.7 + 0.5 * lvl));
+export const SELL_RATIO = 0.7;
+export const PRICE_CREEP = 0.07;      // each owned tower raises the price of the next by 7%
+export const TOWER_SPACING = 26;      // min distance between towers
+export const START_GOLD = 210;
+
+// ---- waves (infinite) ----
+export const MAX_ON_WAVE = 300;
+export const waveCount = n => Math.min(MAX_ON_WAVE, Math.floor(8 + 5 * n + 0.12 * n * n));
+export const waveHp = n => 10 * Math.pow(1.13, n - 1);
+export const waveBounty = n => 1.4 + 0.05 * n;
+
 /** Spawn order for wave n as goblin type indices. Deterministic per wave. */
 export function waveList(n) {
   const cnt = waveCount(n), list = new Uint8Array(cnt), r = mulberry32(n * 7919 + 13);

@@ -1,64 +1,62 @@
-// Headless game simulation. No DOM access, so it can be tested under Node.
-// Enemies are stored struct-of-arrays in typed arrays; dead ones are swap-removed.
+// Headless game simulation (no DOM): waves, economy, towers and weapon impulses on top of BallWorld.
 import {
-  COLS, ROWS, TILE, PATH_LEN, PATH_CELLS, SEG_N, SEG_X0, SEG_Y0, SEG_DX, SEG_DY, SEG_START,
-  GOBLINS, BASE_SPEED, TOWERS, MAX_LEVEL, upgradeCost, SELL_RATIO,
-  waveList, waveHp, waveBounty,
+  W, H, GOBLINS, TOWERS, MAX_LEVEL, upgradeCost, SELL_RATIO, PRICE_CREEP, TOWER_SPACING, START_GOLD,
+  waveList, waveHp, waveBounty, mulberry32,
 } from './data.js';
+import { BallWorld, buildCave, LEAK_Y } from './physics.js';
 
 const MAXE = 1024;
 const MAX_FX = 160;
 const FIRST_WAVE_DELAY = 15, WAVE_GAP = 10;
 
-function mulberry32(a) {
-  return function () {
-    a |= 0; a = a + 0x6D2B79F5 | 0;
-    let t = Math.imul(a ^ a >>> 15, 1 | a);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-}
-
 export class Game {
   constructor(mods, seed = 1) {
     this.mods = mods;
     this.rng = mulberry32(seed);
-    this.gold = 100 + mods.startGold;
+    this.cave = buildCave(seed);
+    this.w = new BallWorld(this.cave, MAXE);
+    this.w.rs = (seed * 2654435761 | 0) || 1;
+    // typed arrays are shared with the physics world
+    this.x = this.w.x; this.y = this.w.y; this.vx = this.w.vx; this.vy = this.w.vy;
+    this.slowT = this.w.slowT; this.slowF = this.w.slowF;
+    this.hp = new Float32Array(MAXE); this.maxhp = new Float32Array(MAXE); this.type = new Uint8Array(MAXE);
+
+    this.gold = START_GOLD + mods.startGold;
     this.lives = 20 + mods.lives;
     this.wave = 0; this.kills = 0; this.time = 0;
     this.over = false; this.reviveUsed = false;
     this.towers = [];
-    this.cells = new Array(COLS * ROWS).fill(null);
     this.events = [];
     this.fx = [];
-
-    this.n = 0;
-    this.x = new Float32Array(MAXE); this.y = new Float32Array(MAXE);
-    this.dist = new Float32Array(MAXE);
-    this.hp = new Float32Array(MAXE); this.maxhp = new Float32Array(MAXE);
-    this.spd = new Float32Array(MAXE);
-    this.slowT = new Float32Array(MAXE); this.slowF = new Float32Array(MAXE);
-    this.off = new Float32Array(MAXE);
-    this.type = new Uint8Array(MAXE); this.seg = new Uint8Array(MAXE);
 
     this.queue = null; this.qi = 0; this.spawnT = 0; this.spawnGap = 1;
     this.spawning = false; this.countdown = FIRST_WAVE_DELAY; this.clearPaid = true;
     this.waveHpNow = 0;
   }
+  get n() { return this.w.n; }
 
-  // ---------- building ----------
+  // ---------- building (free placement) ----------
   isUnlocked(type) { return !!this.mods.unlocked[type]; }
-  canPlace(c, r) {
-    return c >= 0 && c < COLS && r >= 0 && r < ROWS && !PATH_CELLS[r * COLS + c] && !this.cells[r * COLS + c];
+  towerCost(type) { return Math.round(TOWERS[type].cost * (1 + PRICE_CREEP * this.towers.length)); }
+  towerAt(x, y, radius = 18) {
+    let best = null, bd = radius * radius;
+    for (const t of this.towers) { const d = (t.x - x) ** 2 + (t.y - y) ** 2; if (d <= bd) { bd = d; best = t; } }
+    return best;
   }
-  build(type, c, r) {
+  canPlace(x, y) {
+    if (x < 8 || x > W - 8 || y < 8 || y > LEAK_Y - 14) return false;
+    for (const t of this.towers) if ((t.x - x) ** 2 + (t.y - y) ** 2 < TOWER_SPACING * TOWER_SPACING) return false;
+    return true;
+  }
+  build(type, x, y) {
     const def = TOWERS[type];
-    if (this.over || !def || !this.isUnlocked(type) || !this.canPlace(c, r) || this.gold < def.cost) return null;
-    this.gold -= def.cost;
-    const t = { type, c, r, x: (c + 0.5) * TILE, y: (r + 0.5) * TILE, lvl: 1, spent: def.cost, cd: 0, mode: 0, ang: -Math.PI / 2 };
+    if (this.over || !def || !this.isUnlocked(type) || !this.canPlace(x, y)) return null;
+    const cost = this.towerCost(type);
+    if (this.gold < cost) return null;
+    this.gold -= cost;
+    const t = { type, x, y, lvl: 1, spent: cost, cd: 0, mode: 0, ang: -Math.PI / 2 };
     this.applyStats(t);
     this.towers.push(t);
-    this.cells[r * COLS + c] = t;
     return t;
   }
   applyStats(t) {
@@ -84,14 +82,13 @@ export class Game {
     if (i < 0 || this.over) return false;
     this.gold += this.sellValue(t);
     this.towers.splice(i, 1);
-    this.cells[t.r * COLS + t.c] = null;
     return true;
   }
 
   // ---------- waves ----------
   skipCountdown() {
     if (this.spawning || this.over) return false;
-    this.gold += Math.ceil(this.countdown) * 2;
+    this.gold += Math.ceil(this.countdown);
     this.countdown = 0;
     return true;
   }
@@ -106,15 +103,11 @@ export class Game {
     this.events.push('wave');
   }
   spawn(type) {
-    if (this.n >= MAXE) return false;
-    const i = this.n++, g = GOBLINS[type];
+    const g = GOBLINS[type];
+    const i = this.w.add(g.r + 3 + this.rng() * (W - 2 * g.r - 6), -g.r - 2, g.r, g.drag, 25);
+    if (i < 0) return false;
     this.type[i] = type;
     this.hp[i] = this.maxhp[i] = this.waveHpNow * g.hp;
-    this.spd[i] = BASE_SPEED * g.speed;
-    this.dist[i] = 0; this.seg[i] = 0;
-    this.slowT[i] = 0; this.slowF[i] = 1;
-    this.off[i] = (this.rng() - 0.5) * 18;
-    this.x[i] = SEG_X0[0]; this.y[i] = SEG_Y0[0] + this.off[i];
     return true;
   }
 
@@ -123,7 +116,6 @@ export class Game {
     if (this.over) return;
     this.time += dt;
 
-    // wave control
     if (this.spawning) {
       this.spawnT -= dt;
       while (this.spawnT <= 0 && this.qi < this.queue.length) {
@@ -137,11 +129,16 @@ export class Game {
     }
     if (!this.spawning && !this.clearPaid && this.n === 0 && this.wave > 0) {
       this.clearPaid = true;
-      this.gold += Math.round((10 + 2 * this.wave) * this.mods.bounty);
+      this.gold += Math.round((8 + 1.5 * this.wave) * this.mods.bounty);
       this.events.push('clear');
     }
 
-    this.moveEnemies(dt);
+    this.w.step(dt);
+    for (let i = 0; i < this.n; i++) {
+      if (this.y[i] >= LEAK_Y && this.hp[i] > 0) {
+        this.lives -= GOBLINS[this.type[i]].leak; this.hp[i] = 0; this.events.push('leak');
+      }
+    }
     this.fireTowers(dt);
     this.reap();
     this.updateFx(dt);
@@ -153,37 +150,18 @@ export class Game {
     }
   }
 
-  moveEnemies(dt) {
-    const { n, dist, spd, slowT, slowF, hp, seg, x, y, off, type } = this;
-    for (let i = 0; i < n; i++) {
-      let f = 1;
-      if (slowT[i] > 0) { slowT[i] -= dt; f = slowF[i]; }
-      const d = dist[i] += spd[i] * f * dt;
-      if (d >= PATH_LEN) {
-        this.lives -= GOBLINS[type[i]].leak; hp[i] = 0; this.events.push('leak');
-        continue;
-      }
-      let s = seg[i];
-      while (s < SEG_N - 1 && d >= SEG_START[s + 1]) s++;
-      seg[i] = s;
-      const o = d - SEG_START[s];
-      x[i] = SEG_X0[s] + SEG_DX[s] * o - SEG_DY[s] * off[i];
-      y[i] = SEG_Y0[s] + SEG_DY[s] * o + SEG_DX[s] * off[i];
-    }
-  }
-
   hit(i, d) { this.hp[i] -= d; }
   roll(t) { return this.mods.crit > 0 && this.rng() < this.mods.crit ? t.dmg * 2 : t.dmg; }
 
   pickTarget(t) {
-    const { n, x, y, hp, dist, maxhp } = this;
+    const { n, x, y, hp, maxhp } = this;
     const r2 = t.range * t.range;
     let best = -1, bv = -Infinity;
     for (let i = 0; i < n; i++) {
       if (hp[i] <= 0) continue;
       const dx = x[i] - t.x, dy = y[i] - t.y, d2 = dx * dx + dy * dy;
       if (d2 > r2) continue;
-      const v = t.mode === 0 ? dist[i] : t.mode === 1 ? maxhp[i] * 1e4 + hp[i] : -d2;
+      const v = t.mode === 0 ? y[i] : t.mode === 1 ? maxhp[i] * 1e4 + hp[i] : -d2;
       if (v > bv) { bv = v; best = i; }
     }
     return best;
@@ -193,7 +171,7 @@ export class Game {
 
   fireTowers(dt) {
     if (this.n === 0) { for (const t of this.towers) t.cd = Math.max(0, t.cd - dt); return; }
-    const { x, y, hp } = this;
+    const { x, y, hp, w } = this;
     for (const t of this.towers) {
       t.cd -= dt;
       if (t.cd > 0) continue;
@@ -202,20 +180,28 @@ export class Game {
       if (i < 0) { t.cd = 0; continue; }
       t.cd += 1 / t.rate;
       if (t.cd < 0) t.cd = 0;
-      t.ang = Math.atan2(y[i] - t.y, x[i] - t.x);
+      const dx = x[i] - t.x, dy = y[i] - t.y;
+      t.ang = Math.atan2(dy, dx);
       const dmg = this.roll(t);
       if (t.type === 'arrow') {
         this.hit(i, dmg);
+        const L = Math.hypot(dx, dy) || 1;
+        w.push(i, dx / L * TOWERS.arrow.push, dy / L * TOWERS.arrow.push);
         this.addFx({ k: 'line', x1: t.x, y1: t.y, x2: x[i], y2: y[i], age: 0, life: 0.09, c: '#fff1c1' });
       } else if (t.type === 'cannon') {
-        const ex = x[i], ey = y[i], r2 = t.splash * t.splash;
+        const ex = x[i], ey = y[i], R = t.splash, blast = TOWERS.cannon.blast;
         for (let j = 0; j < this.n; j++) {
           if (hp[j] <= 0) continue;
-          const dx = x[j] - ex, dy = y[j] - ey;
-          if (dx * dx + dy * dy <= r2) this.hit(j, j === i ? dmg : dmg * 0.6);
+          const ddx = x[j] - ex, ddy = y[j] - ey, d2 = ddx * ddx + ddy * ddy;
+          if (d2 > R * R) continue;
+          const d = Math.sqrt(d2), fall = 1 - d / R;
+          this.hit(j, j === i ? dmg : dmg * 0.6);
+          // radial blast, biased upward so balls get tossed back up the cave
+          const L = d || 1;
+          w.push(j, ddx / L * blast * fall, ddy / L * blast * fall - 70 * fall);
         }
         this.addFx({ k: 'line', x1: t.x, y1: t.y, x2: ex, y2: ey, age: 0, life: 0.07, c: '#ddd' });
-        this.addFx({ k: 'ring', x: ex, y: ey, r: t.splash, age: 0, life: 0.25, c: '#ff9f43' });
+        this.addFx({ k: 'ring', x: ex, y: ey, r: R, age: 0, life: 0.25, c: '#ff9f43' });
       } else if (t.type === 'tesla') {
         this.fireTesla(t, i, dmg);
       }
@@ -242,7 +228,7 @@ export class Game {
   }
 
   fireTesla(t, first, dmg) {
-    const { x, y, hp, n } = this;
+    const { x, y, hp, n, w } = this;
     const pts = [t.x, t.y, x[first], y[first]];
     const hitSet = [first];
     this.hit(first, dmg);
@@ -258,37 +244,32 @@ export class Game {
       hitSet.push(best); this.hit(best, dmg * 0.8);
       pts.push(x[best], y[best]); cur = best;
     }
+    for (const j of hitSet) w.push(j, (this.rng() - 0.5) * 90, (this.rng() - 0.5) * 90 - 20); // electric jolt
     this.addFx({ k: 'bolt', pts, age: 0, life: 0.12, c: '#fff6a0' });
   }
 
-  /** Remove dead enemies (swap-remove), pay bounties for kills. */
+  /** Remove dead balls (swap-remove), pay bounties for kills (not for leaks). */
   reap() {
-    const { hp, dist, type } = this;
+    const { hp, y, type } = this;
     for (let i = this.n - 1; i >= 0; i--) {
       if (hp[i] > 0) continue;
-      if (dist[i] < PATH_LEN) {
+      if (y[i] < LEAK_Y) {
         const g = GOBLINS[type[i]];
         this.gold += Math.max(1, Math.round(g.bounty * waveBounty(this.wave) * this.mods.bounty));
         this.kills++;
       }
-      const last = --this.n;
-      if (i !== last) this.copyEnemy(last, i);
+      const last = --this.w.n;
+      if (i !== last) { this.w.copy(last, i); this.hp[i] = this.hp[last]; this.maxhp[i] = this.maxhp[last]; this.type[i] = this.type[last]; }
     }
-  }
-  copyEnemy(from, to) {
-    this.x[to] = this.x[from]; this.y[to] = this.y[from]; this.dist[to] = this.dist[from];
-    this.hp[to] = this.hp[from]; this.maxhp[to] = this.maxhp[from]; this.spd[to] = this.spd[from];
-    this.slowT[to] = this.slowT[from]; this.slowF[to] = this.slowF[from]; this.off[to] = this.off[from];
-    this.type[to] = this.type[from]; this.seg[to] = this.seg[from];
   }
   updateFx(dt) {
     const fx = this.fx;
-    let w = 0;
+    let k = 0;
     for (let i = 0; i < fx.length; i++) {
       fx[i].age += dt;
-      if (fx[i].age < fx[i].life) fx[w++] = fx[i];
+      if (fx[i].age < fx[i].life) fx[k++] = fx[i];
     }
-    fx.length = w;
+    fx.length = k;
   }
 
   /** Shards awarded for this run. */

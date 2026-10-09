@@ -1,23 +1,22 @@
-// Canvas renderer. Static map and goblin sprites are pre-rendered once per resize.
-import {
-  COLS, ROWS, TILE, W, H, WP_PX, PATH_CELLS, GOBLINS, TOWERS,
-} from './data.js';
+// Canvas renderer. The cave and ball sprites are pre-rendered once per resize.
+import { W, H, GOBLINS, TOWERS } from './data.js';
+import { LEAK_Y } from './physics.js';
 
 export class Renderer {
   constructor(canvas) {
     this.cv = canvas;
     this.ctx = canvas.getContext('2d', { alpha: false });
-    this.k = 1;
+    this.k = 1; this.caveRef = null;
   }
 
-  resize(cssW, cssH) {
+  resize(cssW) {
     const pr = Math.min(window.devicePixelRatio || 1, 2.5);
     this.k = (cssW * pr) / W;
     this.cv.width = Math.round(W * this.k);
     this.cv.height = Math.round(H * this.k);
     this.cv.style.width = cssW + 'px';
     this.cv.style.height = (cssW * H / W) + 'px';
-    this.buildBackground();
+    this.bg = null;
     this.buildSprites();
   }
 
@@ -29,95 +28,83 @@ export class Renderer {
     return [c, x];
   }
 
-  buildBackground() {
+  buildBackground(cave) {
     const [c, x] = this.makeCanvas(W, H);
-    for (let r = 0; r < ROWS; r++) for (let q = 0; q < COLS; q++) {
-      x.fillStyle = (r + q) & 1 ? '#3d6b3a' : '#437441';
-      x.fillRect(q * TILE, r * TILE, TILE, TILE);
+    const g = x.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#2a2d3a'); g.addColorStop(0.15, '#1b1713'); g.addColorStop(1, '#14100d');
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+    // rocks
+    x.lineJoin = 'round';
+    for (const p of cave.rocks) {
+      x.beginPath(); x.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) x.lineTo(p[i], p[i + 1]);
+      x.closePath();
+      x.fillStyle = '#4d4338'; x.fill();
+      x.lineWidth = 3; x.strokeStyle = '#6d5f4e'; x.stroke();
+      x.lineWidth = 1; x.strokeStyle = 'rgba(0,0,0,0.35)'; x.stroke();
     }
-    x.strokeStyle = 'rgba(0,0,0,0.07)'; x.lineWidth = 1;
-    x.beginPath();
-    for (let q = 0; q <= COLS; q++) { x.moveTo(q * TILE, 0); x.lineTo(q * TILE, H); }
-    for (let r = 0; r <= ROWS; r++) { x.moveTo(0, r * TILE); x.lineTo(W, r * TILE); }
-    x.stroke();
-    // path
-    x.lineJoin = 'round'; x.lineCap = 'butt';
-    const poly = () => { x.beginPath(); WP_PX.forEach(([px, py], i) => i ? x.lineTo(px, py) : x.moveTo(px, py)); x.stroke(); };
-    x.strokeStyle = '#6e5230'; x.lineWidth = TILE; poly();
-    x.strokeStyle = '#b8935c'; x.lineWidth = TILE - 6; poly();
-    x.strokeStyle = 'rgba(255,255,255,0.08)'; x.lineWidth = 2; x.setLineDash([6, 10]); poly(); x.setLineDash([]);
-    // markers
+    // side walls
+    x.fillStyle = '#2b241d'; x.fillRect(0, 0, 3, H); x.fillRect(W - 3, 0, 3, H);
+    // spawn & castle
     x.font = '16px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
-    x.fillText('⛺', TILE * 0.5, TILE * 1.5 - 1);
-    x.fillText('🏰', TILE * 1.5, H - TILE * 0.5 - 2);
-    this.bg = c;
+    x.fillText('⛺', 22, 14); x.fillText('⛺', W - 22, 14); x.fillText('⛺', W / 2, 14);
+    x.fillStyle = '#5b5a63'; x.fillRect(0, LEAK_Y, W, H - LEAK_Y);
+    x.fillStyle = '#7b7a85';
+    for (let cx = 0; cx < W; cx += 24) x.fillRect(cx, LEAK_Y - 4, 14, 6);
+    x.fillStyle = '#fff'; x.fillText('🏰', W / 2, LEAK_Y + 8);
+    this.bg = c; this.caveRef = cave;
   }
 
   buildSprites() {
-    this.sprites = GOBLINS.map((g, idx) => {
-      const s = g.r * 2 + 8;
+    this.sprites = GOBLINS.map(g => {
+      const s = g.r * 2 + 4;
       const [c, x] = this.makeCanvas(s, s);
       x.translate(s / 2, s / 2);
-      const r = g.r;
-      x.fillStyle = 'rgba(0,0,0,0.25)'; x.beginPath(); x.ellipse(0, r * 0.7, r * 0.9, r * 0.4, 0, 0, 7); x.fill();
-      // ears
-      x.fillStyle = g.color; x.strokeStyle = 'rgba(0,0,0,0.55)'; x.lineWidth = 1.2;
-      for (const sx of [-1, 1]) {
-        x.beginPath(); x.moveTo(sx * r * 0.7, -r * 0.2); x.lineTo(sx * (r + 4), -r * 0.9); x.lineTo(sx * r * 0.9, r * 0.35); x.closePath(); x.fill(); x.stroke();
-      }
-      x.beginPath(); x.arc(0, 0, r, 0, 7); x.fill(); x.stroke();
-      // eyes
-      x.fillStyle = '#ffeb3b';
-      x.beginPath(); x.arc(-r * 0.38, -r * 0.15, r * 0.24, 0, 7); x.arc(r * 0.38, -r * 0.15, r * 0.24, 0, 7); x.fill();
-      x.fillStyle = '#111';
-      x.beginPath(); x.arc(-r * 0.38, -r * 0.1, r * 0.1, 0, 7); x.arc(r * 0.38, -r * 0.1, r * 0.1, 0, 7); x.fill();
-      x.strokeStyle = '#111'; x.lineWidth = 1.2; x.beginPath(); x.moveTo(-r * 0.35, r * 0.42); x.lineTo(r * 0.35, r * 0.42); x.stroke();
-      if (idx === 2) { x.fillStyle = '#8d6e63'; x.fillRect(-r * 0.8, -r - 1, r * 1.6, r * 0.45); } // helmet
-      if (idx === 3) { // crown
-        x.fillStyle = '#f1c40f'; x.beginPath();
-        x.moveTo(-r * 0.7, -r * 0.8); x.lineTo(-r * 0.7, -r * 1.35); x.lineTo(-r * 0.3, -r * 1.0); x.lineTo(0, -r * 1.5);
-        x.lineTo(r * 0.3, -r * 1.0); x.lineTo(r * 0.7, -r * 1.35); x.lineTo(r * 0.7, -r * 0.8); x.closePath(); x.fill();
-      }
+      x.fillStyle = g.color; x.beginPath(); x.arc(0, 0, g.r, 0, 7); x.fill();
+      x.lineWidth = 1.5; x.strokeStyle = 'rgba(0,0,0,0.55)'; x.stroke();
+      x.fillStyle = 'rgba(255,255,255,0.35)'; x.beginPath(); x.arc(-g.r * 0.3, -g.r * 0.3, g.r * 0.35, 0, 7); x.fill();
       return { c, s };
     });
   }
 
   draw(game, ui) {
     const ctx = this.ctx, k = this.k;
+    if (!this.bg || this.caveRef !== game.cave) this.buildBackground(game.cave);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(this.bg, 0, 0);
     ctx.setTransform(k, 0, 0, k, 0, 0);
 
-    // selection / ranges
-    if (ui.selTile) {
-      const { c, r } = ui.selTile;
-      ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(c * TILE, r * TILE, TILE, TILE);
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(c * TILE + 1, r * TILE + 1, TILE - 2, TILE - 2);
+    if (ui.selPoint) {
+      const { x, y } = ui.selPoint;
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, 14, 0, 7); ctx.moveTo(x - 20, y); ctx.lineTo(x - 8, y); ctx.moveTo(x + 8, y); ctx.lineTo(x + 20, y);
+      ctx.moveTo(x, y - 20); ctx.lineTo(x, y - 8); ctx.moveTo(x, y + 8); ctx.lineTo(x, y + 20); ctx.stroke();
     }
     if (ui.selTower) {
       const t = ui.selTower;
-      ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1.5;
+      ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(t.x, t.y, t.range, 0, 7); ctx.fill(); ctx.stroke();
     }
 
-    for (const t of game.towers) this.drawTower(ctx, t);
-
-    // goblins
+    // balls
     const { n, x, y, hp, maxhp, type, slowT } = game;
     for (let i = 0; i < n; i++) {
       const sp = this.sprites[type[i]];
+      const f = hp[i] / maxhp[i];
+      ctx.globalAlpha = f > 0.99 ? 1 : 0.4 + 0.6 * Math.max(0, f);   // damaged balls fade
       ctx.drawImage(sp.c, x[i] - sp.s / 2, y[i] - sp.s / 2, sp.s, sp.s);
     }
-    // slow rings + hp bars (batched)
+    ctx.globalAlpha = 1;
     ctx.strokeStyle = '#7fd4ff'; ctx.lineWidth = 1.5; ctx.beginPath();
     for (let i = 0; i < n; i++) if (slowT[i] > 0) { const r = GOBLINS[type[i]].r + 2; ctx.moveTo(x[i] + r, y[i]); ctx.arc(x[i], y[i], r, 0, 6.3); }
     ctx.stroke();
-    ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.beginPath();
-    for (let i = 0; i < n; i++) if (hp[i] < maxhp[i]) { const w = GOBLINS[type[i]].r * 2; ctx.rect(x[i] - w / 2 - 0.5, y[i] - GOBLINS[type[i]].r - 7, w + 1, 4); }
-    ctx.fill();
-    ctx.fillStyle = '#e74c3c'; ctx.beginPath();
-    for (let i = 0; i < n; i++) if (hp[i] < maxhp[i]) { const w = GOBLINS[type[i]].r * 2; ctx.rect(x[i] - w / 2, y[i] - GOBLINS[type[i]].r - 6, w * Math.max(0, hp[i]) / maxhp[i], 2); }
-    ctx.fill();
+    // boss health bars
+    for (let i = 0; i < n; i++) if (type[i] === 3 && hp[i] > 0) {
+      ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x[i] - 15, y[i] - 22, 30, 4);
+      ctx.fillStyle = '#e74c3c'; ctx.fillRect(x[i] - 14, y[i] - 21, 28 * hp[i] / maxhp[i], 2);
+    }
+
+    for (const t of game.towers) this.drawTower(ctx, t);
 
     // effects
     for (const f of game.fx) {
@@ -150,18 +137,17 @@ export class Renderer {
 
   drawTower(ctx, t) {
     const def = TOWERS[t.type];
-    ctx.fillStyle = '#2c3e50'; ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.roundRect(t.x - 16, t.y - 16, 32, 32, 6); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#2c3e50'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(t.x, t.y, 13, 0, 7); ctx.fill(); ctx.stroke();
     ctx.fillStyle = def.color;
-    ctx.beginPath(); ctx.arc(t.x, t.y, 11, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(t.x, t.y, 9.5, 0, 7); ctx.fill(); ctx.stroke();
     ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.ang);
     ctx.fillStyle = '#222';
-    if (t.type === 'arrow') ctx.fillRect(2, -2, 16, 4);
-    else if (t.type === 'cannon') ctx.fillRect(0, -4, 17, 8);
-    else if (t.type === 'tesla') { ctx.fillStyle = '#fff6a0'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, 7); ctx.fill(); }
-    else { ctx.fillStyle = '#e8f8ff'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, 7); ctx.fill(); }
+    if (t.type === 'arrow') ctx.fillRect(2, -2, 15, 4);
+    else if (t.type === 'cannon') ctx.fillRect(0, -4, 16, 8);
+    else { ctx.fillStyle = t.type === 'tesla' ? '#fff6a0' : '#e8f8ff'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, 7); ctx.fill(); }
     ctx.restore();
     ctx.fillStyle = '#ffd54f';
-    for (let i = 0; i < t.lvl; i++) { ctx.beginPath(); ctx.arc(t.x - (t.lvl - 1) * 3 + i * 6, t.y + 13, 2, 0, 7); ctx.fill(); }
+    for (let i = 0; i < t.lvl; i++) { ctx.beginPath(); ctx.arc(t.x - (t.lvl - 1) * 2.5 + i * 5, t.y + 17, 1.8, 0, 7); ctx.fill(); }
   }
 }

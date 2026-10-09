@@ -17,7 +17,7 @@
     <div class="stat" title="Gold">🪙 <b id="hGold">0</b></div>
     <div class="stat" title="Lives">❤️ <b id="hLives">0</b></div>
     <div class="stat" title="Wave">🌊 <b id="hWave">0</b></div>
-    <div class="stat" title="Goblins alive">👺 <b id="hAlive">0</b></div>
+    <div class="stat" title="Balls alive">🔴 <b id="hAlive">0</b></div>
   </header>
   <main id="stage"><canvas id="c"></canvas></main>
   <footer id="bottom">
@@ -33,15 +33,16 @@
 <section id="menu" class="overlay">
   <div class="card">
     <h1>⚔️ Towers of Defense</h1>
-    <p class="sub">Hold the road against an endless goblin horde.<br>Waves never stop — you only lose.</p>
+    <p class="sub">Goblin balls tumble down a Voronoi cave.<br>Waves never stop — you only lose.</p>
     <button id="mPlay" class="primary big">Play</button>
     <button id="mTech" class="big">🔬 Research <span id="mShards" class="pill"></span></button>
     <p id="mBest" class="muted"></p>
     <details><summary>How to play</summary>
       <ul>
-        <li>Tap an empty grass tile, then pick a tower.</li>
+        <li>Tap anywhere in the cave to place a tower — no grid. Towers never block balls.</li>
+        <li>Cannons blast balls around, archers nudge them, Frost slows them. Balls have real mass and collide.</li>
         <li>Tap a tower to upgrade, sell or change its targeting.</li>
-        <li>Goblins that reach the castle cost lives. Bosses cost 10.</li>
+        <li>Balls that reach the castle at the bottom cost lives (bosses cost 10). Every tower you own makes the next one 7% pricier.</li>
         <li>When you fall, the waves you survived earn <b>shards</b> to spend on permanent research.</li>
       </ul>
     </details>
