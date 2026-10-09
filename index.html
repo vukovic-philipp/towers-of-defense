@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Towers of Defense</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="hud">
+    <div class="stats">
+      <div class="stat"><span>Gold</span><b id="hGold">0</b></div>
+      <div class="stat"><span>Lives</span><b id="hLives">0</b></div>
+      <div class="stat"><span>Wave</span><b id="hWave">0</b></div>
+      <div class="stat"><span>Enemies</span><b id="hAlive">0</b></div>
+    </div>
+    <div class="actions">
+      <button id="bWave" class="primary">Start wave 1</button>
+      <button id="bPause">Pause</button>
+      <button id="bSpeed" aria-label="Game speed">1x</button>
+    </div>
+  </header>
+  <main id="stage">
+    <div id="board">
+      <canvas id="cTerrain"></canvas>
+      <canvas id="cGpu"></canvas>
+      <canvas id="cUi"></canvas>
+      <div id="toast"></div>
+      <div id="panel" class="bottom"></div>
+    </div>
+  </main>
+</div>
+
+<section id="menu" class="overlay">
+  <div class="card">
+    <div class="eyebrow">Endless defense</div>
+    <h1>Towers of Defense</h1>
+    <p class="sub">Hundreds of enemies pour through the canyon toward your gate. Build on the rocks and burn, shoot and blast them down.</p>
+    <p id="mError" class="error hidden"></p>
+    <button id="mPlay" class="primary big" disabled>Loading</button>
+    <details>
+      <summary>How to play</summary>
+      <ul>
+        <li>Tap a rock to pick a spot, then choose a tower. Towers only fit on rocks.</li>
+        <li>Gun: quick single shots. Laser: a beam that pierces everything on its line.</li>
+        <li>Flame: sets a cone on fire. Mortar: lobs shells that explode on the thickest clump.</li>
+        <li>Tap a tower to upgrade or sell it. Selling returns 70 percent of what you spent.</li>
+        <li>Enemies that reach the gate on the right cost lives. Big ones cost more.</li>
+        <li>Call the next wave early for bonus gold.</li>
+      </ul>
+    </details>
+    <p class="muted">Needs a browser with WebGPU: Safari on iPadOS 26, or current Chrome and Edge.</p>
+  </div>
+</section>
+
+<section id="over" class="overlay hidden">
+  <div class="card">
+    <div class="eyebrow">Run over</div>
+    <h2>The gate has fallen</h2>
+    <div class="results">
+      <div><span>Wave reached</span><b id="oWave"></b></div>
+      <div><span>Enemies destroyed</span><b id="oKills"></b></div>
+      <div><span>Best wave</span><b id="oBest"></b></div>
+    </div>
+    <button id="oRetry" class="primary big">Try again</button>
+    <button id="oMenu" class="big">Menu</button>
+  </div>
+</section>
+
+<div id="rotate"><div><b>Rotate your device</b><span>This game is played in landscape.</span></div></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
