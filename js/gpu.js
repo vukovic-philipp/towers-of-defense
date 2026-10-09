@@ -1,4 +1,4 @@
-import { WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, towerStats } from './data.js';
+import { WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS } from './data.js';
 import { COMPUTE, RENDER, GW, GH, GRID_CAP, ENEMY_STRIDE, TCFG_STRIDE, TSTATE_STRIDE, PARAM_FLOATS } from './shaders.js';
 
 const MAX_STEPS = 8;
@@ -124,23 +124,24 @@ export async function createGpu(canvas, map) {
       tcU.fill(0);
       lastCounters = { kills: 0, gold: 0, leaks: 0, alive: 0 };
     },
-    // towers: array of {kind, path, x, y}; stats come from towerStats() in data.js
+    // towers: array of {x, y, kind, tier, stats, color:[r,g,b] (0..1)} or null; stats are final numbers
     uploadTowers(list, resetSlots = []) {
       tcU.fill(0);
       list.forEach((t, i) => {
         if (!t) return;
-        const st = towerStats(t.kind, t.path), o = i * (TCFG_STRIDE / 4);
+        const st = t.stats, o = i * (TCFG_STRIDE / 4);
         tcF[o] = t.x; tcF[o + 1] = t.y;
-        tcU[o + 2] = t.kind; tcU[o + 3] = t.path.length;
+        tcU[o + 2] = t.kind; tcU[o + 3] = t.tier;
         tcF[o + 4] = st.range; tcF[o + 5] = st.dmg; tcF[o + 6] = st.rate; tcF[o + 7] = st.radius;
         tcU[o + 8] = 1;
         tcF[o + 9] = st.flight; tcF[o + 10] = st.splash; tcF[o + 11] = st.pierce; tcF[o + 12] = st.pct;
         tcF[o + 13] = st.slow; tcF[o + 14] = st.ignite; tcF[o + 15] = st.spread; tcF[o + 16] = st.ramp;
+        tcF[o + 17] = t.color[0]; tcF[o + 18] = t.color[1]; tcF[o + 19] = t.color[2];
       });
       device.queue.writeBuffer(tcfg, 0, tcBuf);
       for (const i of resetSlots) device.queue.writeBuffer(tstate, i * TSTATE_STRIDE, new Uint8Array(TSTATE_STRIDE));
     },
-    // steps: [{dt, time, spawnStart, numTowers, hpScale, goldMult, spawnY0, spawnY1, maxUsed, frame, counts:[c1..c4]}]
+    // steps: [{dt, time, spawnStart, numTowers, hpScale, goldMult, spawnY0, spawnY1, maxUsed, frame, spdScale, counts}]
     frame(steps, viewState) {
       const n = Math.min(steps.length, MAX_STEPS);
       const enc = device.createCommandEncoder();
@@ -148,8 +149,8 @@ export async function createGpu(canvas, map) {
         const p = steps[s], o = (s * slot) / 4;
         pF[o] = p.dt; pF[o + 1] = p.time; pU[o + 2] = p.spawnStart; pU[o + 3] = p.numTowers;
         pF[o + 4] = p.hpScale; pF[o + 5] = p.goldMult; pF[o + 6] = p.spawnY0; pF[o + 7] = p.spawnY1;
-        pU[o + 8] = p.maxUsed; pU[o + 9] = p.frame;
-        pU[o + 10] = p.counts[0]; pU[o + 11] = p.counts[1]; pU[o + 12] = p.counts[2]; pU[o + 13] = p.counts[3];
+        pU[o + 8] = p.maxUsed; pU[o + 9] = p.frame; pF[o + 10] = p.spdScale;
+        for (let k = 0; k < 12; k++) pU[o + 12 + k] = p.counts[k] || 0; // counts indexed by enemy kind
       }
       if (n) device.queue.writeBuffer(params, 0, pBuf, 0, n * slot);
       const pass = enc.beginComputePass();

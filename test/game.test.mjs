@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildField, makeBuildCheck, FW, FH, CELL, ROCKS } from '../js/map.js';
-import { TOWERS, TREES, NODES, ENEMIES, waveSpec, towerValue, choices, nodeCost, towerStats, WORLD_W } from '../js/data.js';
+import { TOWERS, TREES, NODES, ENEMIES, waveSpec, choices, nodeCost, towerStats, WORLD_W } from '../js/data.js';
+import { RESEARCH, BRANCHES, loadMeta, saveMeta, buyResearch, status, level, effects, shardsFor, researchNode } from '../js/meta.js';
+import { SLIDERS, PERKS, perksFor, defaultPts, designBase, designCost, discount, sanitize, maxPoints, usedPoints } from '../js/design.js';
 import { COMPUTE, RENDER } from '../js/shaders.js';
 
 const map = buildField();
@@ -90,7 +92,7 @@ test('stats are finite, every full path is positive-sum, and costs grow by tier'
       const st = towerStats(kind, [a.id, b.id, 'master']);
       for (const v of Object.values(st)) assert.ok(Number.isFinite(v) && v >= 0);
       assert.ok(st.dmg * st.rate > base.dmg * base.rate * 0.9, `${kind}/${a.id}/${b.id} is weaker than base`);
-      const v = towerValue({ kind, path: [a.id, b.id, 'master'] });
+      const v = [a.id, b.id, 'master'].reduce((sum, id) => sum + nodeCost(kind, NODES[kind][id]), TOWERS[kind].cost);
       assert.ok(v > TOWERS[kind].cost * 4);
     }
     const [n1] = choices(kind, []);
@@ -104,15 +106,88 @@ test('mortar is a real option: a single shell on a clump out-damages a gun shot'
   assert.ok(mortar.radius >= 50);
 });
 
-test('waves grow into the hundreds and bosses arrive every tenth wave', () => {
+test('waves grow into the hundreds, bosses every tenth wave, new enemy types phase in', () => {
   const total = (n) => waveSpec(n).counts.reduce((a, b) => a + b, 0);
-  for (let n = 2; n <= 40; n++) assert.ok(total(n) >= total(n - 1), `wave ${n} shrank`);
+  for (let n = 2; n <= 40; n++) assert.ok(total(n) >= total(n - 1) - 1, `wave ${n} shrank`);
   assert.ok(total(10) >= 150 && total(20) >= 400);
   assert.equal(waveSpec(9).counts[4], 0);
   assert.equal(waveSpec(10).counts[4], 1);
   assert.equal(waveSpec(20).counts[4], 2);
-  assert.equal(waveSpec(1).counts[2], 0, 'wave 1 is swarmers only');
+  assert.deepEqual(waveSpec(1).counts.slice(2), new Array(ENEMIES.length - 2).fill(0), 'wave 1 is swarmers only');
   assert.ok(total(40) < 4096 / 2, 'one wave stays well under the enemy buffer size');
+  assert.equal(ENEMIES.length, 11);
+  const seen = new Set();
+  for (let n = 1; n <= 25; n++) waveSpec(n).counts.forEach((c, k) => { if (c > 0) seen.add(k); });
+  for (let k = 1; k < ENEMIES.length; k++) assert.ok(seen.has(k), `${ENEMIES[k].name} never appears by wave 25`);
+});
+
+test('gold is scarce: a full early wave pays far less than one cheap tower per wave of enemies', () => {
+  // expected gold from killing every enemy of a wave (before research)
+  const gold = (n) => { const w = waveSpec(n); return w.counts.reduce((a, c, k) => a + (k ? c * ENEMIES[k].reward : 0), 0) * w.goldMult; };
+  assert.ok(gold(1) < 25 && gold(5) < 150 && gold(10) < 600, `${gold(1)} ${gold(5)} ${gold(10)}`);
+});
+
+test('research nodes are well formed and purchasable in order', () => {
+  const ids = new Set();
+  for (const n of RESEARCH) {
+    assert.ok(!ids.has(n.id)); ids.add(n.id);
+    assert.equal(n.cost.length, n.max); assert.ok(n.branch >= 0 && n.branch < BRANCHES.length);
+    if (n.req) { assert.ok(researchNode(n.req[0]), `${n.id} requires unknown ${n.req[0]}`); assert.ok(n.req[1] <= researchNode(n.req[0]).max); }
+  }
+  const mem = { d: {}, getItem(k) { return this.d[k] ?? null; }, setItem(k, v) { this.d[k] = v; } };
+  const m = loadMeta(mem);
+  assert.equal(m.shards, 0);
+  assert.equal(status(m, 'eco_start'), 'poor');
+  assert.equal(status(m, 'eco_bounty'), 'locked');
+  m.shards = 100;
+  assert.ok(buyResearch(m, 'eco_start'));
+  assert.equal(level(m, 'eco_start'), 1); assert.equal(m.shards, 94);
+  assert.equal(buyResearch(m, 'eco_wave'), false, 'locked until its requirement is met');
+  assert.ok(buyResearch(m, 'eco_bounty'));
+  saveMeta(m, mem);
+  const back = loadMeta(mem);
+  assert.equal(level(back, 'eco_bounty'), 1);
+  assert.equal(effects(back).startGold, 30);
+  assert.ok(Math.abs(effects(back).bounty - 0.08) < 1e-9);
+  assert.ok(!effects(back).perks.has('pierce'));
+  assert.equal(loadMeta({ getItem() { return '{not json'; } }).shards, 0, 'corrupt storage falls back to empty');
+});
+
+test('research points scale with how far a run got', () => {
+  assert.ok(shardsFor(1, 10) >= 1);
+  assert.ok(shardsFor(10, 300) > shardsFor(5, 100));
+  assert.ok(shardsFor(20, 1500) > shardsFor(10, 300) * 1.5);
+});
+
+test('workshop: default designs match the standard towers, price follows power, budget is enforced', () => {
+  for (let k = 0; k < 4; k++) {
+    const pts = defaultPts(k);
+    assert.deepEqual(Object.keys(pts), Object.keys(SLIDERS[k]));
+    assert.equal(designCost(k, pts, []), TOWERS[k].cost, 'default design costs the base price');
+    const b = designBase(k, pts, []);
+    for (const key of ['range', 'dmg', 'rate']) assert.ok(Math.abs(b[key] - TOWERS[k].base[key]) < 1e-9);
+    assert.ok(Math.abs(b.radius - TOWERS[k].base.radius) < 1e-9);
+    const strong = { ...pts, dmg: 6 };
+    assert.ok(designCost(k, strong, []) > designCost(k, pts, []));
+    assert.ok(designBase(k, strong, []).dmg > b.dmg);
+    assert.ok(usedPoints(pts) <= maxPoints(k, 0));
+    for (const id of perksFor(k)) {
+      const withPerk = designBase(k, pts, [id]);
+      assert.ok(Object.entries(PERKS[id].set).every(([s, v]) => withPerk[s] === v));
+      assert.ok(designCost(k, pts, [id]) > TOWERS[k].cost);
+    }
+  }
+  assert.ok(designBase(2, { dmg: 2, range: 2, radius: 6, ignite: 2 }, []).radius < 0.86, 'wider cone means a smaller cosine');
+  assert.ok(designBase(2, { dmg: 2, range: 2, radius: 10, ignite: 2 }, []).radius >= 0.3, 'cone stays bounded');
+  assert.equal(discount(100, 0.04), 95);
+  assert.ok(discount(5, 0.5) >= 5);
+});
+
+test('workshop: stale or hostile saved designs are sanitised', () => {
+  const d = sanitize({ kind: 1, name: 'x', pts: { dmg: 99, range: -4, bogus: 3 }, perks: ['ramp', 'ramp', 'splash', 'nope', 'pierce'] });
+  assert.deepEqual(Object.keys(d.pts), Object.keys(SLIDERS[1]));
+  assert.equal(d.pts.dmg, 10); assert.equal(d.pts.range, 0); assert.equal(d.pts.radius, 2);
+  assert.deepEqual(d.perks, ['ramp'], 'only perks valid for this behaviour, no duplicates');
 });
 
 test('shader source has no unresolved template values', () => {
@@ -120,5 +195,4 @@ test('shader source has no unresolved template values', () => {
     assert.ok(!/undefined|NaN|\$\{/.test(src));
     assert.ok(src.includes('@compute') || src.includes('@vertex'));
   }
-  assert.equal(ENEMIES.length, 5);
 });

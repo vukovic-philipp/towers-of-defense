@@ -23,6 +23,20 @@ Needs WebGPU: Safari on iPadOS or iOS 26 and later, or current Chrome and Edge. 
 | Flame | Cone of fire that also leaves enemies burning |
 | Mortar | Slow shells that explode on the densest clump |
 
+## Enemies
+
+Ten kinds, introduced gradually (a toast announces each new one): Swarmer, Grunt, Brute, Titan (boss every tenth wave), plus Sprinter (very fast), Plated (every bullet and shell loses 10 damage, beams and fire ignore armor), Medic (heals enemies around it), Phantom (blinks out of reach about a third of the time), Shielded (regenerating shield, burning bypasses it) and Berserker (speeds up as it is hurt).
+
+Waves launch on a timer, there is no skip button. Gold is deliberately scarce: kills pay little, so where you spend matters.
+
+## Research
+
+Dying earns research points (more for higher waves and more kills). Spend them in the research tree, opened from the game-over card or the menu, for permanent bonuses in four branches: Economy (starting gold, bounties, wave income, salvage), Defense (lives, damage, range, slower enemies), Engineering (cheaper towers and upgrades, workshop budget and slots) and Arsenal (unlocks for workshop perks). Progress is saved in the browser's local storage.
+
+## Turret workshop
+
+Design your own turret from the menu, game-over card or the in-game Workshop button. Pick a behaviour (gun, laser, flame or mortar), spread stat points over its sliders within a budget, choose up to two perks, name and colour it. The price follows the stats, and a design left at defaults costs exactly the standard tower. Saved designs appear as build options and keep the behaviour's upgrade tree. Research raises the point budget and slots and unlocks more perks.
+
 ## Upgrade trees
 
 Every tower has its own tree: pick one of two paths (tier 1), then one of two specialties inside it (tier 2), then take the shared Veteran capstone (tier 3). Each choice locks out its alternatives for that tower, so two guns can end up as very different weapons. Open the full tree from a tower's panel with "Upgrade tree". Selling returns 70 percent of everything spent on it.
@@ -38,7 +52,7 @@ The nodes and numbers live in `js/data.js`; their effects run in the shaders.
 
 ## How it works
 
-All enemy simulation runs in WebGPU compute shaders (`js/shaders.js`). Up to 4096 enemies live in a GPU buffer, double-buffered each step:
+All enemy simulation runs in WebGPU compute shaders (`js/shaders.js`). Up to 4096 enemies (ten kinds, with armor, shields, healing, phasing and rage handled in the shader) live in a GPU buffer, double-buffered each step:
 
 1. `clearGrid` and `buildGrid` bin enemies into a 24 px spatial hash.
 2. `towers` picks targets and decides what fires, one thread per tower.
@@ -51,6 +65,9 @@ Enemies, tower bodies, beams, flames, shells and explosions are drawn straight f
 ## Files
 
 - `js/data.js` tower stats, upgrade trees, enemy and wave tables
+- `js/meta.js` saved progress and the research tree
+- `js/design.js` workshop maths (stats, pricing, perks)
+- `js/research.js`, `js/workshop.js` the two overlays
 - `js/map.js` level geometry, flow and distance fields, build checks
 - `js/shaders.js` WGSL for the simulation and rendering
 - `js/gpu.js` WebGPU setup, buffers, per-frame submission
