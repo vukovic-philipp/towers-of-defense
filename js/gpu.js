@@ -27,6 +27,7 @@ export async function createGpu(canvas, map) {
   const tstate = mk(MAX_TOWERS * TSTATE_STRIDE, S.STORAGE | S.COPY_DST | S.COPY_SRC, 'tstate');
   const counters = mk(16, S.STORAGE | S.COPY_DST | S.COPY_SRC, 'counters');
   const staging = mk(16, S.MAP_READ | S.COPY_DST, 'staging');
+  const stagingT = mk(MAX_TOWERS * TSTATE_STRIDE, S.MAP_READ | S.COPY_DST, 'stagingT');
   const params = mk(slot * MAX_STEPS, S.UNIFORM | S.COPY_DST, 'params');
   const view = mk(16, S.UNIFORM | S.COPY_DST, 'view');
 
@@ -108,6 +109,7 @@ export async function createGpu(canvas, map) {
   let epoch = 0;
   let mapping = false;
   let lastCounters = { kills: 0, gold: 0, leaks: 0, alive: 0 };
+  const usage = new Float32Array(MAX_TOWERS); // per tower: shots or seconds fired, as last read back
 
   const api = {
     device, adapter,
@@ -123,7 +125,10 @@ export async function createGpu(canvas, map) {
       device.queue.writeBuffer(counters, 0, new Uint32Array(4));
       tcU.fill(0);
       lastCounters = { kills: 0, gold: 0, leaks: 0, alive: 0 };
+      usage.fill(0);
     },
+    // swap in the flow and distance field of another map
+    setField(field) { device.queue.writeBuffer(fieldBuf, 0, field); },
     // towers: array of {x, y, kind, tier, stats, color:[r,g,b] (0..1)} or null; stats are final numbers
     uploadTowers(list, resetSlots = []) {
       tcU.fill(0);
@@ -133,10 +138,11 @@ export async function createGpu(canvas, map) {
         tcF[o] = t.x; tcF[o + 1] = t.y;
         tcU[o + 2] = t.kind; tcU[o + 3] = t.tier;
         tcF[o + 4] = st.range; tcF[o + 5] = st.dmg; tcF[o + 6] = st.rate; tcF[o + 7] = st.radius;
-        tcU[o + 8] = 1;
+        tcU[o + 8] = t.starved ? 2 : 1;
         tcF[o + 9] = st.flight; tcF[o + 10] = st.splash; tcF[o + 11] = st.pierce; tcF[o + 12] = st.pct;
         tcF[o + 13] = st.slow; tcF[o + 14] = st.ignite; tcF[o + 15] = st.spread; tcF[o + 16] = st.ramp;
         tcF[o + 17] = t.color[0]; tcF[o + 18] = t.color[1]; tcF[o + 19] = t.color[2];
+        tcF[o + 20] = st.ap; tcF[o + 21] = st.exec; tcF[o + 22] = st.crit;
       });
       device.queue.writeBuffer(tcfg, 0, tcBuf);
       for (const i of resetSlots) device.queue.writeBuffer(tstate, i * TSTATE_STRIDE, new Uint8Array(TSTATE_STRIDE));
@@ -150,7 +156,7 @@ export async function createGpu(canvas, map) {
         pF[o] = p.dt; pF[o + 1] = p.time; pU[o + 2] = p.spawnStart; pU[o + 3] = p.numTowers;
         pF[o + 4] = p.hpScale; pF[o + 5] = p.goldMult; pF[o + 6] = p.spawnY0; pF[o + 7] = p.spawnY1;
         pU[o + 8] = p.maxUsed; pU[o + 9] = p.frame; pF[o + 10] = p.spdScale;
-        for (let k = 0; k < 12; k++) pU[o + 12 + k] = p.counts[k] || 0; // counts indexed by enemy kind
+        for (let k = 0; k < 16; k++) pU[o + 12 + k] = p.counts[k] || 0; // counts indexed by enemy kind
       }
       if (n) device.queue.writeBuffer(params, 0, pBuf, 0, n * slot);
       const pass = enc.beginComputePass();
@@ -178,16 +184,20 @@ export async function createGpu(canvas, map) {
       rp.end();
 
       const readNow = !mapping;
-      if (readNow) enc.copyBufferToBuffer(counters, 0, staging, 0, 16);
+      if (readNow) { enc.copyBufferToBuffer(counters, 0, staging, 0, 16); enc.copyBufferToBuffer(tstate, 0, stagingT, 0, MAX_TOWERS * TSTATE_STRIDE); }
       device.queue.submit([enc.finish()]);
       if (readNow) {
         mapping = true;
         const e = epoch;
-        staging.mapAsync(GPUMapMode.READ).then(() => {
+        Promise.all([staging.mapAsync(GPUMapMode.READ), stagingT.mapAsync(GPUMapMode.READ)]).then(() => {
           const v = new Uint32Array(staging.getMappedRange().slice(0));
-          staging.unmap();
+          const ts = new Float32Array(stagingT.getMappedRange().slice(0));
+          staging.unmap(); stagingT.unmap();
           mapping = false;
-          if (e === epoch) lastCounters = { kills: v[0], gold: v[1] / 16, leaks: v[2], alive: v[3] };
+          if (e === epoch) {
+            lastCounters = { kills: v[0], gold: v[1] / 16, leaks: v[2], alive: v[3] };
+            for (let i = 0; i < MAX_TOWERS; i++) usage[i] = ts[i * (TSTATE_STRIDE / 4) + 15];
+          }
         }).catch(() => { mapping = false; });
       }
     },
@@ -206,6 +216,7 @@ export async function createGpu(canvas, map) {
     },
     // cumulative totals as last read back from the GPU
     get counters() { return lastCounters; },
+    get usage() { return usage; },
   };
   return api;
 }
