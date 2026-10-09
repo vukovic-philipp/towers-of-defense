@@ -23,7 +23,18 @@ Needs WebGPU: Safari on iPadOS or iOS 26 and later, or current Chrome and Edge. 
 | Flame | Cone of fire that also leaves enemies burning |
 | Mortar | Slow shells that explode on the densest clump |
 
-Each tower has four levels. Selling returns 70 percent of everything spent on it.
+## Upgrade trees
+
+Every tower has its own tree: pick one of two paths (tier 1), then one of two specialties inside it (tier 2), then take the shared Veteran capstone (tier 3). Each choice locks out its alternatives for that tower, so two guns can end up as very different weapons. Open the full tree from a tower's panel with "Upgrade tree". Selling returns 70 percent of everything spent on it.
+
+| Tower | Path A | Path B |
+| --- | --- | --- |
+| Gun | Rapid Fire, then Gatling (more speed) or Frag Rounds (splash) | Long Barrel, then Piercing Rounds (hits a whole line) or Armor Breaker (percent of max health) |
+| Laser | Wide Lens, then Overcharge (damage ramps while locked on) or Cryo Beam (slows) | Focus Lens, then Searing Beam (ignites) or Deadeye (percent of max health) |
+| Flame | Napalm, then Wildfire (fire spreads between enemies) or Brimstone (slows) | Dragon Breath, then Blue Flame (more damage) or Firestorm (wide cone) |
+| Mortar | Heavy Shells, then Siege Breaker (big targets) or Shock Shells (slows) | Rapid Mortar, then Incendiary (ignites) or Saturation (huge radius) |
+
+The nodes and numbers live in `js/data.js`; their effects run in the shaders.
 
 ## How it works
 
@@ -39,7 +50,7 @@ Enemies, tower bodies, beams, flames, shells and explosions are drawn straight f
 
 ## Files
 
-- `js/data.js` tower, enemy and wave tables
+- `js/data.js` tower stats, upgrade trees, enemy and wave tables
 - `js/map.js` level geometry, flow and distance fields, build checks
 - `js/shaders.js` WGSL for the simulation and rendering
 - `js/gpu.js` WebGPU setup, buffers, per-frame submission

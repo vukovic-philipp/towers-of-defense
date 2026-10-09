@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildField, makeBuildCheck, FW, FH, CELL, ROCKS } from '../js/map.js';
-import { TOWERS, ENEMIES, waveSpec, towerValue, MAX_LEVEL, WORLD_W } from '../js/data.js';
+import { TOWERS, TREES, NODES, ENEMIES, waveSpec, towerValue, choices, nodeCost, towerStats, WORLD_W } from '../js/data.js';
 import { COMPUTE, RENDER } from '../js/shaders.js';
 
 const map = buildField();
@@ -44,14 +44,64 @@ test('each rock has room to build and walls are not buildable', () => {
   assert.equal(build.canBuild(800, 20), false);
 });
 
-test('tower tables are complete and upgrades strictly improve', () => {
+const MOD_KEYS = new Set(['range', 'dmg', 'rate', 'radius', 'ignite', 'flight', 'splash', 'pierce', 'pct', 'slow', 'spread', 'ramp']);
+
+test('every tower has a well-formed upgrade tree', () => {
   assert.equal(TOWERS.length, 4);
-  for (const t of TOWERS) {
-    assert.equal(t.upgrade.length, MAX_LEVEL);
-    for (const k of ['range', 'dmg', 'rate', 'radius']) assert.equal(t[k].length, MAX_LEVEL + 1);
-    for (let l = 1; l <= MAX_LEVEL; l++) assert.ok(t.dmg[l] > t.dmg[l - 1] && t.range[l] >= t.range[l - 1]);
-    assert.ok(towerValue({ kind: TOWERS.indexOf(t), level: MAX_LEVEL }) > t.cost);
-  }
+  assert.equal(TREES.length, 4);
+  TREES.forEach((tree, kind) => {
+    assert.equal(tree.filter((n) => n.tier === 1).length, 2, 'two paths in tier 1');
+    for (const n of tree.filter((x) => x.tier === 1)) {
+      assert.equal(tree.filter((c) => c.parent === n.id).length, 2, `${n.id} offers two specialties`);
+    }
+    const ids = new Set();
+    for (const n of [...tree, NODES[kind].master]) {
+      assert.ok(!ids.has(n.id), `duplicate id ${n.id}`); ids.add(n.id);
+      for (const k of [...Object.keys(n.mods.mul), ...Object.keys(n.mods.set)]) assert.ok(MOD_KEYS.has(k), `${n.id}: unknown stat ${k}`);
+      assert.ok(n.name && n.desc);
+    }
+  });
+});
+
+test('upgrade choices are mutually exclusive and walk down the tree', () => {
+  TREES.forEach((tree, kind) => {
+    const first = choices(kind, []);
+    assert.equal(first.length, 2);
+    for (const a of first) {
+      const second = choices(kind, [a.id]);
+      assert.equal(second.length, 2);
+      assert.ok(second.every((n) => n.parent === a.id));
+      const other = first.find((n) => n !== a);
+      // nothing under the path not taken is reachable
+      const reachable = new Set(second.map((n) => n.id));
+      for (const n of tree.filter((x) => x.parent === other.id)) assert.ok(!reachable.has(n.id));
+      for (const b of second) {
+        assert.deepEqual(choices(kind, [a.id, b.id]).map((n) => n.id), ['master']);
+        assert.deepEqual(choices(kind, [a.id, b.id, 'master']), []);
+      }
+    }
+  });
+});
+
+test('stats are finite, every full path is positive-sum, and costs grow by tier', () => {
+  TREES.forEach((tree, kind) => {
+    const base = towerStats(kind, []);
+    for (const a of choices(kind, [])) for (const b of choices(kind, [a.id])) {
+      const st = towerStats(kind, [a.id, b.id, 'master']);
+      for (const v of Object.values(st)) assert.ok(Number.isFinite(v) && v >= 0);
+      assert.ok(st.dmg * st.rate > base.dmg * base.rate * 0.9, `${kind}/${a.id}/${b.id} is weaker than base`);
+      const v = towerValue({ kind, path: [a.id, b.id, 'master'] });
+      assert.ok(v > TOWERS[kind].cost * 4);
+    }
+    const [n1] = choices(kind, []);
+    assert.ok(nodeCost(kind, NODES[kind].master) > nodeCost(kind, n1));
+  });
+});
+
+test('mortar is a real option: a single shell on a clump out-damages a gun shot', () => {
+  const mortar = towerStats(3, []), gun = towerStats(0, []);
+  assert.ok(mortar.dmg * mortar.rate > gun.dmg * gun.rate * 0.7);
+  assert.ok(mortar.radius >= 50);
 });
 
 test('waves grow into the hundreds and bosses arrive every tenth wave', () => {

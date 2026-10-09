@@ -1,4 +1,4 @@
-import { WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, TOWERS } from './data.js';
+import { WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, towerStats } from './data.js';
 import { COMPUTE, RENDER, GW, GH, GRID_CAP, ENEMY_STRIDE, TCFG_STRIDE, TSTATE_STRIDE, PARAM_FLOATS } from './shaders.js';
 
 const MAX_STEPS = 8;
@@ -124,17 +124,18 @@ export async function createGpu(canvas, map) {
       tcU.fill(0);
       lastCounters = { kills: 0, gold: 0, leaks: 0, alive: 0 };
     },
-    // towers: array of {kind, level, x, y, active}; stats are looked up in data.js
+    // towers: array of {kind, path, x, y}; stats come from towerStats() in data.js
     uploadTowers(list, resetSlots = []) {
       tcU.fill(0);
       list.forEach((t, i) => {
         if (!t) return;
-        const d = TOWERS[t.kind], o = i * (TCFG_STRIDE / 4);
+        const st = towerStats(t.kind, t.path), o = i * (TCFG_STRIDE / 4);
         tcF[o] = t.x; tcF[o + 1] = t.y;
-        tcU[o + 2] = t.kind; tcU[o + 3] = t.level;
-        tcF[o + 4] = d.range[t.level]; tcF[o + 5] = d.dmg[t.level];
-        tcF[o + 6] = d.rate[t.level]; tcF[o + 7] = d.radius[t.level];
+        tcU[o + 2] = t.kind; tcU[o + 3] = t.path.length;
+        tcF[o + 4] = st.range; tcF[o + 5] = st.dmg; tcF[o + 6] = st.rate; tcF[o + 7] = st.radius;
         tcU[o + 8] = 1;
+        tcF[o + 9] = st.flight; tcF[o + 10] = st.splash; tcF[o + 11] = st.pierce; tcF[o + 12] = st.pct;
+        tcF[o + 13] = st.slow; tcF[o + 14] = st.ignite; tcF[o + 15] = st.spread; tcF[o + 16] = st.ramp;
       });
       device.queue.writeBuffer(tcfg, 0, tcBuf);
       for (const i of resetSlots) device.queue.writeBuffer(tstate, i * TSTATE_STRIDE, new Uint8Array(TSTATE_STRIDE));

@@ -1,4 +1,4 @@
-import { ENEMIES, TOWERS, WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS, MORTAR_FLIGHT, FLAME_COS } from './data.js';
+import { ENEMIES, TOWERS, WORLD_W, WORLD_H, MAX_ENEMIES, MAX_TOWERS } from './data.js';
 import { FW, FH, CELL } from './map.js';
 
 export const GRID_CELL = 24;
@@ -7,9 +7,9 @@ export const GW = Math.ceil(WORLD_W / GRID_CELL);
 export const GH = Math.ceil(WORLD_H / GRID_CELL);
 
 // Byte layouts shared with gpu.js
-export const ENEMY_STRIDE = 40;  // pos2 vel2 hp maxhp kind burn burnDps seed
-export const TCFG_STRIDE = 40;   // pos2 kind level range dmg rate radius active pad
-export const TSTATE_STRIDE = 56; // aim2 tgt2 shellTo2 boomPos2 cd fire shellT boom evt tgtIdx
+export const ENEMY_STRIDE = 48;  // pos2 vel2 hp maxhp kind burn burnDps seed slow spread
+export const TCFG_STRIDE = 72;   // pos2 kind level range dmg rate radius live flight splash pierce pct slow ignite spread ramp pad
+export const TSTATE_STRIDE = 64; // aim2 tgt2 shellTo2 boomPos2 cd fire shellT boom evt tgtIdx heat pad
 export const PARAM_FLOATS = 16;
 
 const f = (n) => Number(n).toFixed(3);
@@ -27,8 +27,6 @@ const GCAP = ${GRID_CAP}u;
 const FW = ${FW}i;
 const FH = ${FH}i;
 const FCELL = ${f(CELL)};
-const FLIGHT = ${f(MORTAR_FLIGHT)};
-const FLAME_COS = ${f(FLAME_COS)};
 
 struct Params {
   dt: f32, time: f32, spawnStart: u32, numTowers: u32,
@@ -36,11 +34,14 @@ struct Params {
   maxUsed: u32, frame: u32, c1: u32, c2: u32,
   c3: u32, c4: u32, pad0: u32, pad1: u32,
 };
-struct Enemy { pos: vec2f, vel: vec2f, hp: f32, maxhp: f32, kind: u32, burn: f32, burnDps: f32, seed: f32 };
-struct Tower { pos: vec2f, kind: u32, level: u32, range: f32, dmg: f32, rate: f32, radius: f32, live: u32, pad: u32 };
+struct Enemy { pos: vec2f, vel: vec2f, hp: f32, maxhp: f32, kind: u32, burn: f32, burnDps: f32, seed: f32, slow: f32, spread: f32 };
+struct Tower {
+  pos: vec2f, kind: u32, level: u32, range: f32, dmg: f32, rate: f32, radius: f32, live: u32,
+  flight: f32, splash: f32, pierce: f32, pct: f32, slow: f32, ignite: f32, spread: f32, ramp: f32, pad: f32,
+};
 struct TState {
   aim: vec2f, tgt: vec2f, shellTo: vec2f, boomPos: vec2f,
-  cd: f32, fire: f32, shellT: f32, boom: f32, evt: u32, tgtIdx: u32,
+  cd: f32, fire: f32, shellT: f32, boom: f32, evt: u32, tgtIdx: u32, heat: f32, pad: f32,
 };
 
 var<private> E_RAD: array<f32,5> = ${arr([0, ...ENEMIES.slice(1).map((e) => e.radius)])};
@@ -140,19 +141,23 @@ fn towers(@builtin(global_invocation_id) gid: vec3u) {
 
   if (c.kind == 0u) {
     if (found && s.cd <= 0.0) {
-      s.fire = 1.0; s.tgt = bp; s.tgtIdx = bi; s.evt = 1u;
+      let want = normalize(bp - c.pos);
+      s.aim = want;
+      s.fire = 1.0; s.tgt = select(bp, c.pos + want * c.range, c.pierce > 0.0); s.tgtIdx = bi; s.evt = 1u;
       s.cd = select(s.cd + 1.0 / c.rate, 1.0 / c.rate, s.cd < -P.dt);
     }
   } else if (c.kind == 1u || c.kind == 2u) {
-    if (found) { s.fire = 1.0; s.evt = 1u; }
+    if (found) { s.fire = 1.0; s.evt = 1u; s.heat = min(1.0, s.heat + P.dt * 0.5); }
+    else { s.heat = max(0.0, s.heat - P.dt); }
   } else {
     if (s.shellT > 0.0) {
       s.shellT -= P.dt;
       if (s.shellT <= 0.0) { s.shellT = -1.0; s.evt = 1u; s.boom = 1.0; s.boomPos = s.shellTo; }
     }
-    if (found && s.cd <= 0.0 && s.shellT < 0.0) {
-      s.shellTo = bp + bv * FLIGHT;
-      s.shellT = FLIGHT;
+    // a fresh tower starts with zeroed state, so "no shell in flight" means shellT <= 0
+    if (found && s.cd <= 0.0 && s.shellT <= 0.0) {
+      s.shellTo = bp + bv * c.flight;
+      s.shellT = c.flight;
       s.cd = 1.0 / c.rate;
     }
   }
@@ -179,7 +184,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
       e.vel = vec2f(E_SPD[k], 0.0);
       e.maxhp = E_HP[k] * P.hpScale;
       e.hp = e.maxhp;
-      e.burn = 0.0; e.burnDps = 0.0; e.seed = h3;
+      e.burn = 0.0; e.burnDps = 0.0; e.seed = h3; e.slow = 0.0; e.spread = 0.0;
     }
     enemiesOut[i] = e;
     return;
@@ -190,34 +195,56 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
 
   // damage from towers (events computed this step by the tower pass)
   var dmg = 0.0;
+  var slowIn = 0.0;
   for (var t = 0u; t < P.numTowers; t++) {
     let c = tcfg[t];
     if (c.live == 0u) { continue; }
     let s = tstate[t];
     if (s.evt == 0u) { continue; }
+    var hit = false;
+    var amt = 0.0;
+    var tick = 1.0; // continuous towers scale their effects by dt
     if (c.kind == 0u) {
-      if (s.tgtIdx == i) { dmg += c.dmg; }
+      if (c.pierce > 0.0) {
+        let rel = e.pos - c.pos;
+        let along = dot(rel, s.aim);
+        if (along > 0.0 && along < c.range && abs(cross2(rel, s.aim)) < c.pierce + r) { hit = true; amt = c.dmg; }
+      } else if (s.tgtIdx == i) {
+        hit = true; amt = c.dmg;
+      } else if (c.splash > 0.0 && distance(e.pos, s.tgt) < c.splash + r) {
+        hit = true; amt = c.dmg * 0.5;
+      }
     } else if (c.kind == 1u) {
+      tick = P.dt;
       let rel = e.pos - c.pos;
       let along = dot(rel, s.aim);
-      if (along > 0.0 && along < c.range && abs(cross2(rel, s.aim)) < c.radius + r) { dmg += c.dmg * P.dt; }
+      if (along > 0.0 && along < c.range && abs(cross2(rel, s.aim)) < c.radius + r) {
+        hit = true; amt = c.dmg * (1.0 + s.heat * c.ramp) * tick;
+      }
     } else if (c.kind == 2u) {
+      tick = P.dt;
       let rel = e.pos - c.pos;
       let d = length(rel);
-      if (d < c.range + r && d > 0.001 && dot(rel / d, s.aim) > FLAME_COS) {
-        dmg += c.dmg * P.dt;
-        e.burn = 2.5;
-        e.burnDps = max(e.burnDps, c.dmg * 0.5);
-      }
+      if (d < c.range + r && d > 0.001 && dot(rel / d, s.aim) > c.radius) { hit = true; amt = c.dmg * tick; }
     } else {
       let d = distance(e.pos, s.boomPos);
-      if (d < c.radius + r) { dmg += c.dmg * (1.0 - 0.5 * d / (c.radius + r)); }
+      if (d < c.radius + r) { hit = true; amt = c.dmg * (1.0 - 0.5 * d / (c.radius + r)); }
+    }
+    if (hit) {
+      dmg += amt + c.pct * e.maxhp * tick;
+      slowIn = max(slowIn, c.slow);
+      if (c.ignite > 0.0) {
+        e.burn = 2.5;
+        e.burnDps = max(e.burnDps, c.ignite);
+        e.spread = max(e.spread, c.spread);
+      }
     }
   }
+  e.slow = max(e.slow - P.dt * 0.5, slowIn);
   if (e.burn > 0.0) {
     dmg += e.burnDps * P.dt;
     e.burn -= P.dt;
-    if (e.burn <= 0.0) { e.burnDps = 0.0; }
+    if (e.burn <= 0.0) { e.burnDps = 0.0; e.spread = 0.0; }
   }
   e.hp -= dmg;
   if (e.hp <= 0.0) {
@@ -236,6 +263,8 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
 
   // crowd separation through the spatial grid
   var push = vec2f(0.0);
+  var catchDps = 0.0;
+  var catchSpread = 0.0;
   let cc = cellOf(e.pos);
   for (var dy = -1; dy <= 1; dy++) {
     for (var dx = -1; dx <= 1; dx++) {
@@ -250,6 +279,10 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
         let d = e.pos - o.pos;
         let rr = r + E_RAD[o.kind];
         let d2 = dot(d, d);
+        if (o.burn > 0.0 && o.spread > 0.5 && d2 < (rr + 9.0) * (rr + 9.0)) {
+          catchDps = max(catchDps, o.burnDps * 0.8);
+          catchSpread = max(catchSpread, o.spread - 0.34);
+        }
         if (d2 < rr * rr) {
           if (d2 > 0.0001) {
             let dist = sqrt(d2);
@@ -262,6 +295,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
 
+  if (catchDps > 0.0 && e.burn <= 0.5) { e.burn = 2.0; e.burnDps = catchDps; e.spread = catchSpread; }
   let f = sampleField(e.pos);
   var dir = f.xy;
   let fl = length(dir);
@@ -271,7 +305,7 @@ fn enemies(@builtin(global_invocation_id) gid: vec3u) {
   let ang = ((e.seed - 0.5) * 1.1 + 0.45 * sin(P.time * 0.7 + e.seed * 60.0)) * room;
   let sa = sin(ang); let ca = cos(ang);
   let wdir = vec2f(dir.x * ca - dir.y * sa, dir.x * sa + dir.y * ca);
-  let spd = E_SPD[k] * (0.86 + 0.28 * e.seed);
+  let spd = E_SPD[k] * (0.86 + 0.28 * e.seed) * (1.0 - clamp(e.slow, 0.0, 0.75));
   let desired = wdir * spd + push * spd * 3.5;
   e.vel = mix(e.vel, desired, 1.0 - exp(-P.dt * 9.0));
   e.pos += e.vel * P.dt;
@@ -336,6 +370,7 @@ fn vsEnemy(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
   var col = E_COL[e.kind];
   let hpf = clamp(e.hp / e.maxhp, 0.0, 1.0);
   col = mix(col * 0.45, col, 0.35 + 0.65 * hpf);
+  col = mix(col, vec3f(0.45, 0.72, 1.0), clamp(e.slow, 0.0, 0.75) * 0.8);
   if (e.burn > 0.0) { col = mix(col, vec3f(1.0, 0.5, 0.18), 0.55 + 0.25 * sin(V.time * 30.0 + e.seed * 50.0)); }
   o.col = vec4f(col, 1.0);
   o.misc = vec4f(rad, hpf, f32(e.kind), 0.0);
@@ -469,7 +504,7 @@ fn fsFx(i: FOut) -> @location(0) vec4f {
     let a0 = c.pos + s.aim * 16.0;
     let sd = segDist(p, a0, s.tgt);
     let line = 1.0 - smoothstep(0.5, 0.5 + max(V.aa, 1.0), sd.x - 0.6);
-    let hit = disc(p, s.tgt, 4.5 * s.fire);
+    let hit = disc(p, s.tgt, select(4.5, 0.0, c.pierce > 0.0) * s.fire);
     rgb = mix(col, vec3f(1.0), 0.4);
     a = max(line * 0.9, hit * 0.8) * s.fire;
   } else if (c.kind == 1u) {
@@ -485,14 +520,14 @@ fn fsFx(i: FOut) -> @location(0) vec4f {
     let d = length(rel);
     let cs = dot(rel / max(d, 0.001), s.aim);
     let t = clamp(d / c.range, 0.0, 1.0);
-    let cone = smoothstep(FLAME_COS - 0.02, FLAME_COS + 0.1, cs);
+    let cone = smoothstep(c.radius - 0.02, c.radius + 0.1, cs);
     let flick = 0.72 + 0.28 * sin(d * 0.45 - V.time * 28.0 + rel.x * 0.31 + rel.y * 0.23);
     let k = cone * pow(1.0 - t, 0.8) * flick * smoothstep(8.0, 18.0, d);
     rgb = mix(vec3f(1.0, 0.92, 0.55), mix(vec3f(1.0, 0.45, 0.1), vec3f(0.75, 0.12, 0.08), t), smoothstep(0.0, 0.5, t));
     a = k * 0.8 * s.fire;
   } else {
     if (s.shellT > 0.0) {
-      let tt = 1.0 - s.shellT / FLIGHT;
+      let tt = 1.0 - s.shellT / c.flight;
       let span = distance(c.pos, s.shellTo);
       let pos = mix(c.pos, s.shellTo, tt) - vec2f(0.0, sin(tt * 3.14159) * span * 0.28);
       let ground = mix(c.pos, s.shellTo, tt);
